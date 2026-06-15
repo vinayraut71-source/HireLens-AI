@@ -16,6 +16,7 @@ from app.roadmap.router import router as roadmap_router
 from app.recommendations.router import router as recommendations_router, discovery_router
 from app.ai.router import router as ai_router
 from app.infrastructure.router import router as infra_router
+from app.job_sources.router import router as job_sources_router
 
 app = FastAPI(
     title=settings.APP_NAME,
@@ -47,6 +48,7 @@ app.include_router(recommendations_router, prefix="/api/v1")
 app.include_router(discovery_router, prefix="/api/v1")
 app.include_router(ai_router, prefix="/api/v1")
 app.include_router(infra_router, prefix="/api/v1")
+app.include_router(job_sources_router, prefix="/api/v1")
 
 
 @app.get("/health", tags=["System Health"])

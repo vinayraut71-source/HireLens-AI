@@ -8,7 +8,7 @@ from app.shared.base import BaseModel, SoftDeleteMixin
 
 class Job(SoftDeleteMixin, BaseModel):
     __tablename__ = "jobs"
-    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=True, index=True)
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     company: Mapped[str | None] = mapped_column(String(255), nullable=True)
     description: Mapped[str] = mapped_column(Text, nullable=False)
@@ -20,6 +20,19 @@ class Job(SoftDeleteMixin, BaseModel):
     required_skills: Mapped[dict] = mapped_column(JSONB, default=list, server_default="[]")
     is_saved: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     discovered_by_agent: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    
+    # Ingestion Enhancements
+    external_source: Mapped[str | None] = mapped_column(String(50), nullable=True, index=True)
+    external_job_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    normalized_company: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    normalized_location: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    ingestion_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    job_status: Mapped[str] = mapped_column(String(20), default="active", server_default="active")
+    job_type: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    experience_level: Mapped[str | None] = mapped_column(String(50), nullable=True)
+
+
 
 class JobEmbedding(BaseModel):
     __tablename__ = "job_embeddings"

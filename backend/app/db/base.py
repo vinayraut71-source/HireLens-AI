@@ -26,3 +26,4 @@ from app.infrastructure.models import InfrastructureConfig
 
 # B2B Models
 from app.models.b2b import Company, Recruiter, CompanyUser, JobPosting, CandidateMatch
+from app.job_sources.models import ExternalJobSource

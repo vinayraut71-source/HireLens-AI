@@ -23,6 +23,7 @@ class User(SoftDeleteMixin, BaseModel):
     plan_tier: Mapped[str] = mapped_column(String(20), default="free", server_default="free")
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
     is_verified: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    is_admin: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     preferences: Mapped["UserPreference | None"] = relationship(

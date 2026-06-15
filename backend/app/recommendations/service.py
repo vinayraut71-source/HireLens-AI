@@ -447,7 +447,7 @@ class JobDiscoveryService:
             raise HTTPException(status_code=404, detail="No active resume version found for user")
 
         # 2. Fetch active non-deleted jobs in the system (global selection candidates)
-        jobs_stmt = select(Job).where(Job.is_deleted == False)
+        jobs_stmt = select(Job).where(Job.is_deleted == False, Job.job_status == "active")
         jobs_res = await self.db.execute(jobs_stmt)
         jobs = jobs_res.scalars().all()
 
@@ -713,7 +713,11 @@ class JobDiscoveryService:
         rec_stmt = (
             select(JobRecommendation)
             .join(Job, JobRecommendation.job_id == Job.id)
-            .where(JobRecommendation.user_id == user_id, Job.is_deleted == False)
+            .where(
+                JobRecommendation.user_id == user_id,
+                Job.is_deleted == False,
+                Job.job_status == "active"
+            )
             .order_by(desc(JobRecommendation.recommendation_score))
         )
         rec_res = await self.db.execute(rec_stmt)
@@ -730,6 +734,7 @@ class JobDiscoveryService:
             .where(
                 JobRecommendation.user_id == user_id,
                 Job.is_deleted == False,
+                Job.job_status == "active",
                 JobRecommendation.created_at >= twenty_four_hours_ago
             )
             .order_by(desc(JobRecommendation.recommendation_score))
@@ -786,6 +791,7 @@ class JobDiscoveryService:
             .where(
                 JobRecommendation.user_id == user_id,
                 Job.is_deleted == False,
+                Job.job_status == "active",
                 JobRecommendation.recommendation_status == "saved"
             )
             .order_by(desc(JobRecommendation.recommendation_score))
