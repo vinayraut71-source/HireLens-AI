@@ -19,7 +19,7 @@ from app.jobs.models import Job, JobEmbedding, MatchResult, SkillGap, JobMatch, 
 from app.applications.models import Application, ApplicationPackage, OutcomeEvent
 from app.analytics.models import UserAnalyticsSnapshot
 from app.audit.models import AgentAuditLog
-from app.roadmap.models import LearningRoadmap, RoadmapModule
+from app.roadmap.models import LearningRoadmap, RoadmapModule, CareerRoadmap, RoadmapMilestone
 from app.recommendations.models import RecommendationSignal
 from app.ai.models import AgentRun
 from app.infrastructure.models import InfrastructureConfig

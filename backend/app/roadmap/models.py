@@ -5,7 +5,7 @@ PRD Section 7.2: learning_roadmaps, roadmap_modules.
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -54,3 +54,50 @@ class RoadmapModule(BaseModel):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     roadmap: Mapped["LearningRoadmap"] = relationship(back_populates="modules")
+
+
+class CareerRoadmap(BaseModel):
+    """Sprint 7: Career Roadmap model representing learning progress for a JobMatch."""
+    __tablename__ = "career_roadmaps"
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    resume_version_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("resume_versions.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    job_match_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("job_matches.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    generated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    total_estimated_weeks: Mapped[int] = mapped_column(Integer, nullable=False)
+    roadmap_status: Mapped[str] = mapped_column(
+        String(20), default="active", server_default="active", nullable=False
+    )
+
+    milestones: Mapped[list["RoadmapMilestone"]] = relationship(
+        back_populates="roadmap", cascade="all, delete-orphan", order_by="RoadmapMilestone.milestone_order"
+    )
+
+
+class RoadmapMilestone(BaseModel):
+    """Sprint 7: Roadmap milestone representing a single skill gap in the learning sequence."""
+    __tablename__ = "roadmap_milestones"
+
+    roadmap_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("career_roadmaps.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    skill_gap_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("skill_gap_analyses.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    milestone_order: Mapped[int] = mapped_column(Integer, nullable=False)
+    milestone_title: Mapped[str] = mapped_column(String(255), nullable=False)
+    estimated_weeks: Mapped[int] = mapped_column(Integer, nullable=False)
+    priority_score: Mapped[int] = mapped_column(Integer, nullable=False)
+    completion_status: Mapped[str] = mapped_column(
+        String(20), default="pending", server_default="pending", nullable=False
+    )
+
+    roadmap: Mapped["CareerRoadmap"] = relationship(back_populates="milestones")

@@ -18,6 +18,8 @@ from app.jobs.schemas import (
     SkillGapAnalysisResponse,
 )
 from app.jobs.service import JobService, JobMatchingService, SkillGapService
+from app.roadmap.service import RoadmapService
+from app.roadmap.schemas import CareerRoadmapResponse
 
 router = APIRouter(prefix="/jobs", tags=["Jobs & Matching"])
 
@@ -236,3 +238,38 @@ async def update_skill_gap(
     current_user: Annotated[User, Depends(get_current_active_user)],
 ):
     raise NotImplementedError("Sprint 6")
+
+
+# --- Career Roadmap Endpoints (Sprint 7) ---
+
+@router.post(
+    "/matches/{match_id}/roadmap",
+    response_model=CareerRoadmapResponse,
+    status_code=201,
+    summary="Generate career roadmap for a job match",
+    description="Generates a learning roadmap mapped from the skill gaps for a job match.",
+    tags=["Career Roadmaps"],
+)
+async def generate_career_roadmap(
+    match_id: UUID,
+    db: DBSession,
+    current_user: Annotated[User, Depends(get_current_active_user)],
+):
+    service = RoadmapService(db)
+    return await service.generate_roadmap(current_user.id, match_id)
+
+
+@router.get(
+    "/matches/{match_id}/roadmap",
+    response_model=CareerRoadmapResponse,
+    summary="Get career roadmap for a job match",
+    description="Retrieves the cached learning roadmap for a specific job match.",
+    tags=["Career Roadmaps"],
+)
+async def get_career_roadmap(
+    match_id: UUID,
+    db: DBSession,
+    current_user: Annotated[User, Depends(get_current_active_user)],
+):
+    service = RoadmapService(db)
+    return await service.get_roadmap(current_user.id, match_id)

@@ -27,3 +27,37 @@ class RoadmapResponse(BaseModel):
 class RoadmapCreateRequest(BaseModel):
     match_result_id: UUID
     title: str | None = None
+
+
+# --- Career Roadmap Generator Schemas (Sprint 7) ---
+
+class MilestoneResponse(BaseModel):
+    id: UUID
+    roadmap_id: UUID
+    skill_gap_id: UUID
+    milestone_order: int
+    milestone_title: str
+    estimated_weeks: int
+    priority_score: int
+    completion_status: str
+
+    class Config:
+        from_attributes = True
+
+
+class CareerRoadmapResponse(BaseModel):
+    id: UUID
+    user_id: UUID
+    resume_version_id: UUID
+    job_match_id: UUID
+    generated_at: datetime
+    total_estimated_weeks: int
+    roadmap_status: str
+    milestones: list[MilestoneResponse]
+
+    class Config:
+        from_attributes = True
+
+
+class MilestonePatchRequest(BaseModel):
+    completion_status: str
