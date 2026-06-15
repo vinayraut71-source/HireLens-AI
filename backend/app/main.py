@@ -13,7 +13,7 @@ from app.jobs.router import router as jobs_router
 from app.applications.router import router as applications_router
 from app.analytics.router import router as analytics_router
 from app.roadmap.router import router as roadmap_router
-from app.recommendations.router import router as recommendations_router
+from app.recommendations.router import router as recommendations_router, discovery_router
 from app.ai.router import router as ai_router
 from app.infrastructure.router import router as infra_router
 
@@ -44,6 +44,7 @@ app.include_router(applications_router, prefix="/api/v1")
 app.include_router(analytics_router, prefix="/api/v1")
 app.include_router(roadmap_router, prefix="/api/v1")
 app.include_router(recommendations_router, prefix="/api/v1")
+app.include_router(discovery_router, prefix="/api/v1")
 app.include_router(ai_router, prefix="/api/v1")
 app.include_router(infra_router, prefix="/api/v1")
 

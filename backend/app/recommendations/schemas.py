@@ -61,3 +61,35 @@ class FeedbackSummaryResponse(BaseModel):
     best_performing_resumes: list[ResumePerfItem] = []
     highest_converting_categories: list[JobCategoryItem] = []
     signal_counts_by_type: dict[str, int] = {}
+
+
+class JobRecommendationResponse(BaseModel):
+    id: UUID
+    job_id: UUID
+    resume_version_id: UUID
+    recommendation_score: float
+    match_score: float
+    ats_score: float
+    skill_gap_score: float
+    feedback_score: float
+    confidence_score: float
+    recommendation_reason: dict
+    recommendation_status: str
+    job_snapshot: dict
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class JobDiscoveryResponse(BaseModel):
+    recommendations: list[JobRecommendationResponse]
+    total_recommendations: int
+    generated_at: datetime
+
+
+class RecommendationStatusUpdate(BaseModel):
+    status: Literal["recommended", "viewed", "saved", "dismissed", "applied"]
+
+

@@ -20,7 +20,7 @@ from app.applications.models import Application, ApplicationPackage, OutcomeEven
 from app.analytics.models import UserAnalyticsSnapshot, AnalyticsSnapshot, AnalyticsInsight
 from app.audit.models import AgentAuditLog
 from app.roadmap.models import LearningRoadmap, RoadmapModule, CareerRoadmap, RoadmapMilestone
-from app.recommendations.models import RecommendationSignal
+from app.recommendations.models import RecommendationSignal, JobRecommendation
 from app.ai.models import AgentRun
 from app.infrastructure.models import InfrastructureConfig
 

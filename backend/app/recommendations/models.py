@@ -3,7 +3,7 @@ Recommendations module — models.
 PRD Section 7.2: recommendation_signals.
 """
 import uuid
-from sqlalchemy import Float, ForeignKey, Integer, String
+from sqlalchemy import Float, ForeignKey, Integer, String, Index
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -33,3 +33,37 @@ class RecommendationSignal(BaseModel):
     confidence_score: Mapped[float] = mapped_column(Float, nullable=False)
     signal_weight: Mapped[float] = mapped_column(Float, nullable=False)
     metadata_: Mapped[dict] = mapped_column("metadata", JSONB, default=dict, server_default="{}")
+
+
+class JobRecommendation(BaseModel):
+    """Sprint 11: Intelligent Job Recommendation."""
+
+    __tablename__ = "job_recommendations"
+
+    __table_args__ = (
+        Index("ix_job_recommendations_user_id_status", "user_id", "recommendation_status"),
+    )
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    job_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("jobs.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    resume_version_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("resume_versions.id", ondelete="CASCADE"), nullable=False
+    )
+    recommendation_score: Mapped[float] = mapped_column(Float, nullable=False, index=True)
+    match_score: Mapped[float] = mapped_column(Float, nullable=False)
+    ats_score: Mapped[float] = mapped_column(Float, nullable=False)
+    skill_gap_score: Mapped[float] = mapped_column(Float, nullable=False)
+    feedback_score: Mapped[float] = mapped_column(Float, nullable=False)
+    confidence_score: Mapped[float] = mapped_column(Float, nullable=False)
+    recommendation_reason: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict, server_default="{}")
+    recommendation_status: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="recommended", server_default="recommended", index=True
+    )
+    job_snapshot: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict, server_default="{}")
+
+
+

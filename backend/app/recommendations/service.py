@@ -1,17 +1,19 @@
-"""Recommendations module — service layer. Sprint 10 Feedback Learning Loop."""
 import logging
 import uuid
+import hashlib
 from datetime import datetime, timezone, timedelta
 from collections import Counter
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, delete, desc, and_
+from sqlalchemy.orm import selectinload
 from fastapi import HTTPException
 
-from app.recommendations.models import RecommendationSignal
+from app.recommendations.models import RecommendationSignal, JobRecommendation
 from app.applications.models import JobApplication, OutcomeType
-from app.jobs.models import Job, JobMatch, SkillGapAnalysis
-from app.resumes.models import ResumeVersion
+from app.jobs.models import Job, JobMatch, SkillGapAnalysis, SkillGap, MatchResult
+from app.resumes.models import ResumeProfile, ResumeVersion, ATSAnalysis
 from app.roadmap.models import CareerRoadmap, RoadmapMilestone
+from app.analytics.models import AnalyticsSnapshot
 
 logger = logging.getLogger(__name__)
 
@@ -403,3 +405,393 @@ class FeedbackService:
             "highest_converting_categories": highest_converting_categories,
             "signal_counts_by_type": signal_counts
         }
+
+
+class JobDiscoveryService:
+    def __init__(self, db: AsyncSession):
+        self.db = db
+
+    async def discover_jobs(self, user_id: uuid.UUID) -> list[JobRecommendation]:
+        """
+        Intelligent Job Discovery Agent recommendation generator.
+        Generates/overwrites recommendations score deterministically.
+        """
+        # 1. Fetch user's active resume version (default profile's active version first, fallback to latest)
+        stmt = (
+            select(ResumeVersion)
+            .join(ResumeProfile, ResumeVersion.profile_id == ResumeProfile.id)
+            .where(
+                ResumeProfile.user_id == user_id,
+                ResumeProfile.is_default == True,
+                ResumeVersion.is_deleted == False
+            )
+            .order_by(ResumeVersion.version_number.desc())
+            .limit(1)
+        )
+        res = await self.db.execute(stmt)
+        resume_version = res.scalar_one_or_none()
+        if not resume_version:
+            stmt_fb = (
+                select(ResumeVersion)
+                .where(
+                    ResumeVersion.user_id == user_id,
+                    ResumeVersion.is_deleted == False
+                )
+                .order_by(ResumeVersion.created_at.desc())
+                .limit(1)
+            )
+            res_fb = await self.db.execute(stmt_fb)
+            resume_version = res_fb.scalar_one_or_none()
+
+        if not resume_version:
+            raise HTTPException(status_code=404, detail="No active resume version found for user")
+
+        # 2. Fetch active non-deleted jobs in the system (global selection candidates)
+        jobs_stmt = select(Job).where(Job.is_deleted == False)
+        jobs_res = await self.db.execute(jobs_stmt)
+        jobs = jobs_res.scalars().all()
+
+        # Pre-fetch elements for user feedback score calculation
+        sig_stmt = select(RecommendationSignal).where(RecommendationSignal.user_id == user_id)
+        sig_res = await self.db.execute(sig_stmt)
+        all_signals = list(sig_res.scalars().all())
+
+        # Pre-fetch latest Analytics Snapshot
+        snap_stmt = (
+            select(AnalyticsSnapshot)
+            .where(AnalyticsSnapshot.user_id == user_id)
+            .order_by(AnalyticsSnapshot.generated_at.desc())
+            .limit(1)
+        )
+        snap_res = await self.db.execute(snap_stmt)
+        snapshot = snap_res.scalar_one_or_none()
+
+        # Fetch successful applications for analytics score mapping (interview, offer, or accepted)
+        success_stmt = (
+            select(Job.company, Job.title)
+            .join(JobApplication, Job.id == JobApplication.job_id)
+            .where(
+                JobApplication.user_id == user_id,
+                JobApplication.status.in_(["interview", "offer", "accepted"]),
+                Job.is_deleted == False
+            )
+        )
+        success_res = await self.db.execute(success_stmt)
+        success_jobs = list(success_res.all())
+
+        # For checking SkillGap table status later
+        sg_table_stmt = select(SkillGap).where(SkillGap.user_id == user_id, SkillGap.status == "completed")
+        sg_table_res = await self.db.execute(sg_table_stmt)
+        completed_sg_names = {sg.skill_name.lower().strip() for sg in sg_table_res.scalars().all()}
+
+        recommendations_list = []
+
+        for job in jobs:
+            # --- 1. Match Score (30%) ---
+            match_score = 0.0
+            job_match_stmt = select(JobMatch).where(
+                JobMatch.user_id == user_id,
+                JobMatch.job_id == job.id,
+                JobMatch.resume_version_id == resume_version.id
+            )
+            job_match_res = await self.db.execute(job_match_stmt)
+            job_match = job_match_res.scalar_one_or_none()
+
+            if job_match:
+                match_score = job_match.overall_match_score
+            else:
+                match_res_stmt = select(MatchResult).where(
+                    MatchResult.user_id == user_id,
+                    MatchResult.job_id == job.id,
+                    MatchResult.version_id == resume_version.id
+                )
+                match_res = (await self.db.execute(match_res_stmt)).scalar_one_or_none()
+                if match_res:
+                    match_score = match_res.overall_score if match_res.overall_score > 1.0 else match_res.overall_score * 100.0
+
+            # --- 2. ATS Score (25%) ---
+            ats_score = 0.0
+            jd_clean = job.description.strip()
+            jd_hash = hashlib.sha256(jd_clean.encode("utf-8")).hexdigest()
+
+            ats_stmt = (
+                select(ATSAnalysis.ats_score)
+                .join(ResumeVersion, ATSAnalysis.resume_version_id == ResumeVersion.id)
+                .where(
+                    ResumeVersion.user_id == user_id,
+                    ATSAnalysis.job_description_hash == jd_hash,
+                    ResumeVersion.is_deleted == False
+                )
+            )
+            ats_res = await self.db.execute(ats_stmt)
+            ats_scores = list(ats_res.scalars().all())
+            if ats_scores:
+                ats_score = float(max(ats_scores))
+
+            # --- 3. Feedback Score (20%) ---
+            # Map signals belonging to this specific job match or application
+            match_ids_stmt = select(JobMatch.id).where(JobMatch.user_id == user_id, JobMatch.job_id == job.id)
+            match_ids = set((await self.db.execute(match_ids_stmt)).scalars().all())
+
+            app_ids_stmt = select(JobApplication.id).where(JobApplication.user_id == user_id, JobApplication.job_id == job.id)
+            app_ids = set((await self.db.execute(app_ids_stmt)).scalars().all())
+
+            feedback_score = 50.0
+            for s in all_signals:
+                if s.job_match_id in match_ids or s.application_id in app_ids:
+                    st = s.signal_type.lower().strip()
+                    if st == "interview_received":
+                        feedback_score += 15.0
+                    elif st == "offer_received":
+                        feedback_score += 25.0
+                    elif st == "acceptance_received":
+                        feedback_score += 30.0
+                    elif st == "roadmap_completed":
+                        feedback_score += 20.0
+                    elif st == "rejection_received":
+                        feedback_score -= 25.0
+                    elif st == "no_response":
+                        feedback_score -= 10.0
+                    elif st == "low_match_failure":
+                        feedback_score -= 15.0
+            feedback_score = max(0.0, min(100.0, feedback_score))
+
+            # --- 4. Skill Gap Score (15%) ---
+            skill_gap_score = 100.0
+            missing_skills_count = 0
+            uncompleted_critical_count = 0
+            progress_ratio = 0.0
+            has_roadmap = False
+
+            if job_match:
+                missing_skills = job_match.missing_skills or []
+                missing_skills_count = len(missing_skills)
+                skill_gap_score -= (missing_skills_count * 10.0)
+                skill_gap_score = max(40.0, skill_gap_score)
+
+                sa_stmt = select(SkillGapAnalysis).where(SkillGapAnalysis.job_match_id == job_match.id)
+                sa_res = await self.db.execute(sa_stmt)
+                analyses = list(sa_res.scalars().all())
+
+                rm_stmt = (
+                    select(CareerRoadmap)
+                    .options(selectinload(CareerRoadmap.milestones))
+                    .where(CareerRoadmap.job_match_id == job_match.id)
+                )
+                rm_res = await self.db.execute(rm_stmt)
+                roadmap = rm_res.scalar_one_or_none()
+
+                completed_milestone_gap_ids = set()
+                if roadmap:
+                    has_roadmap = True
+                    total_m = len(roadmap.milestones)
+                    completed_m = sum(1 for m in roadmap.milestones if m.completion_status.lower() in ("completed", "done"))
+                    progress_ratio = completed_m / total_m if total_m > 0 else 0.0
+
+                    for m in roadmap.milestones:
+                        if m.completion_status.lower() in ("completed", "done"):
+                            completed_milestone_gap_ids.add(m.skill_gap_id)
+
+                for analysis in analyses:
+                    if analysis.learning_priority.lower() in ("critical", "high"):
+                        is_completed = (
+                            analysis.id in completed_milestone_gap_ids or
+                            analysis.missing_skill.lower().strip() in completed_sg_names
+                        )
+                        if not is_completed:
+                            uncompleted_critical_count += 1
+
+                critical_penalty = min(30.0, uncompleted_critical_count * 15.0)
+                skill_gap_score -= critical_penalty
+
+                if has_roadmap:
+                    skill_gap_score += (progress_ratio * 30.0)
+
+            skill_gap_score = max(0.0, min(100.0, skill_gap_score))
+
+            # --- 5. Analytics Success Signals (10%) ---
+            analytics_score = 50.0
+            company_matched = False
+            title_matched = False
+
+            if snapshot:
+                if resume_version.id == snapshot.strongest_resume_version_id:
+                    analytics_score += 20.0
+                if (snapshot.interview_rate or 0.0) > 0.3:
+                    analytics_score += 10.0
+                if (snapshot.offer_rate or 0.0) > 0.1:
+                    analytics_score += 10.0
+                if (snapshot.acceptance_rate or 0.0) > 0.05:
+                    analytics_score += 10.0
+
+            for s_company, s_title in success_jobs:
+                if s_company and job.company and s_company.strip().lower() == job.company.strip().lower():
+                    company_matched = True
+                if s_title and job.title and s_title.strip().lower() in job.title.strip().lower():
+                    title_matched = True
+
+            if company_matched:
+                analytics_score += 15.0
+            if title_matched:
+                analytics_score += 15.0
+
+            analytics_score = max(0.0, min(100.0, analytics_score))
+
+            # --- Recommendation Score ---
+            recommendation_score = (
+                0.30 * match_score +
+                0.25 * ats_score +
+                0.20 * feedback_score +
+                0.15 * skill_gap_score +
+                0.10 * analytics_score
+            )
+            recommendation_score = round(recommendation_score, 2)
+
+            # --- Structured Reasons ---
+            recommendation_reason = {
+                "high_match_score": match_score >= 80.0,
+                "ats_compatible": ats_score >= 80.0,
+                "skills_aligned": skill_gap_score >= 80.0,
+                "similar_to_previous_success": feedback_score > 70.0 or company_matched or title_matched,
+                "roadmap_progress_helpful": progress_ratio > 0.0
+            }
+
+            # --- Confidence Score ---
+            ats_check_stmt = select(ATSAnalysis).where(
+                ATSAnalysis.resume_version_id == resume_version.id,
+                ATSAnalysis.job_description_hash == jd_hash
+            )
+            ats_check_res = await self.db.execute(ats_check_stmt)
+            has_ats_analysis = ats_check_res.first() is not None
+
+            confidence_score = 50.0
+            if job_match is not None:
+                confidence_score += 25.0
+            if has_ats_analysis:
+                confidence_score += 25.0
+
+            # Delete old duplicate (idempotency safety)
+            del_stmt = delete(JobRecommendation).where(
+                JobRecommendation.user_id == user_id,
+                JobRecommendation.job_id == job.id,
+                JobRecommendation.resume_version_id == resume_version.id
+            )
+            await self.db.execute(del_stmt)
+
+            job_snap = {
+                "title": job.title,
+                "company": job.company,
+                "location": job.location,
+                "salary": f"${job.salary_min} - ${job.salary_max}" if (job.salary_min or job.salary_max) else None,
+                "url": job.source_url
+            }
+
+            db_rec = JobRecommendation(
+                user_id=user_id,
+                job_id=job.id,
+                resume_version_id=resume_version.id,
+                recommendation_score=recommendation_score,
+                match_score=match_score,
+                ats_score=ats_score,
+                skill_gap_score=skill_gap_score,
+                feedback_score=feedback_score,
+                confidence_score=confidence_score,
+                recommendation_reason=recommendation_reason,
+                recommendation_status="recommended",
+                job_snapshot=job_snap
+            )
+            self.db.add(db_rec)
+            recommendations_list.append(db_rec)
+
+        try:
+            await self.db.commit()
+        except Exception:
+            await self.db.rollback()
+            raise
+
+        # Query all recommendations ordered descending by score
+        rec_stmt = (
+            select(JobRecommendation)
+            .join(Job, JobRecommendation.job_id == Job.id)
+            .where(JobRecommendation.user_id == user_id, Job.is_deleted == False)
+            .order_by(desc(JobRecommendation.recommendation_score))
+        )
+        rec_res = await self.db.execute(rec_stmt)
+        return list(rec_res.scalars().all())
+
+    async def get_recommendations(self, user_id: uuid.UUID) -> list[JobRecommendation]:
+        """
+        Fetches recommendations. Uses cache if recommendations are < 24 hours old.
+        """
+        twenty_four_hours_ago = datetime.now(timezone.utc) - timedelta(hours=24)
+        stmt = (
+            select(JobRecommendation)
+            .join(Job, JobRecommendation.job_id == Job.id)
+            .where(
+                JobRecommendation.user_id == user_id,
+                Job.is_deleted == False,
+                JobRecommendation.created_at >= twenty_four_hours_ago
+            )
+            .order_by(desc(JobRecommendation.recommendation_score))
+        )
+        res = await self.db.execute(stmt)
+        cached = list(res.scalars().all())
+        if cached:
+            return cached
+
+        # Generate new
+        return await self.discover_jobs(user_id)
+
+    async def refresh_recommendations(self, user_id: uuid.UUID) -> list[JobRecommendation]:
+        """
+        Bypasses/purges cache and forces recalculation of recommendations.
+        """
+        stmt = delete(JobRecommendation).where(JobRecommendation.user_id == user_id)
+        await self.db.execute(stmt)
+        await self.db.commit()
+
+        return await self.discover_jobs(user_id)
+
+    async def update_recommendation_status(
+        self, recommendation_id: uuid.UUID, user_id: uuid.UUID, status: str
+    ) -> JobRecommendation:
+        """
+        Updates the status of a job recommendation for ownership validation.
+        """
+        stmt = select(JobRecommendation).where(
+            JobRecommendation.id == recommendation_id,
+            JobRecommendation.user_id == user_id
+        )
+        res = await self.db.execute(stmt)
+        rec = res.scalar_one_or_none()
+        if not rec:
+            raise HTTPException(status_code=404, detail="Recommendation not found or ownership invalid")
+
+        rec.recommendation_status = status
+        rec.updated_at = datetime.now(timezone.utc)
+        try:
+            await self.db.commit()
+        except Exception:
+            await self.db.rollback()
+            raise
+        return rec
+
+    async def get_saved_recommendations(self, user_id: uuid.UUID) -> list[JobRecommendation]:
+        """
+        Fetches recommendations with status 'saved' for the user.
+        """
+        stmt = (
+            select(JobRecommendation)
+            .join(Job, JobRecommendation.job_id == Job.id)
+            .where(
+                JobRecommendation.user_id == user_id,
+                Job.is_deleted == False,
+                JobRecommendation.recommendation_status == "saved"
+            )
+            .order_by(desc(JobRecommendation.recommendation_score))
+        )
+        res = await self.db.execute(stmt)
+        return list(res.scalars().all())
+
+
+
