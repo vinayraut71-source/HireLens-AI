@@ -16,8 +16,8 @@ from app.resumes.models import (
     ATSAnalysis,
 )
 from app.jobs.models import Job, JobEmbedding, MatchResult, SkillGap, JobMatch, SkillGapAnalysis
-from app.applications.models import Application, ApplicationPackage, OutcomeEvent
-from app.analytics.models import UserAnalyticsSnapshot
+from app.applications.models import Application, ApplicationPackage, OutcomeEvent, JobApplication, ApplicationTimelineEvent
+from app.analytics.models import UserAnalyticsSnapshot, AnalyticsSnapshot, AnalyticsInsight
 from app.audit.models import AgentAuditLog
 from app.roadmap.models import LearningRoadmap, RoadmapModule, CareerRoadmap, RoadmapMilestone
 from app.recommendations.models import RecommendationSignal
