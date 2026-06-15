@@ -5,6 +5,7 @@ from datetime import datetime, timezone, timedelta
 from collections import Counter
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, desc, func
+from sqlalchemy.orm import selectinload
 from fastapi import HTTPException
 
 from app.analytics.models import AnalyticsSnapshot, AnalyticsInsight
@@ -33,15 +34,14 @@ class AnalyticsService:
         one_hour_ago = now - timedelta(hours=1)
         stmt_cache = (
             select(AnalyticsSnapshot)
+            .options(selectinload(AnalyticsSnapshot.insights))
             .where(AnalyticsSnapshot.user_id == user_id, AnalyticsSnapshot.generated_at >= one_hour_ago)
             .order_by(AnalyticsSnapshot.generated_at.desc())
         )
         res_cache = await self.db.execute(stmt_cache)
         cached_snap = res_cache.scalar_one_or_none()
         if cached_snap:
-            stmt_insights = select(AnalyticsInsight).where(AnalyticsInsight.snapshot_id == cached_snap.id)
-            res_insights = await self.db.execute(stmt_insights)
-            return cached_snap, list(res_insights.scalars().all())
+            return cached_snap, list(cached_snap.insights)
 
         # 2. Retrieve previous snapshot for delta calculation
         stmt_prev = (
@@ -411,6 +411,7 @@ class AnalyticsService:
         """
         stmt = (
             select(AnalyticsSnapshot)
+            .options(selectinload(AnalyticsSnapshot.insights))
             .where(AnalyticsSnapshot.user_id == user_id)
             .order_by(AnalyticsSnapshot.generated_at.desc())
             .limit(1)
@@ -421,9 +422,7 @@ class AnalyticsService:
         if not snapshot:
             snapshot, insights = await self.generate_snapshot(user_id)
         else:
-            stmt_insights = select(AnalyticsInsight).where(AnalyticsInsight.snapshot_id == snapshot.id)
-            res_insights = await self.db.execute(stmt_insights)
-            insights = list(res_insights.scalars().all())
+            insights = list(snapshot.insights)
 
         # Compute resume intelligence details dynamically
         resume_intelligence = await self._compute_resume_intelligence(user_id)
@@ -442,6 +441,7 @@ class AnalyticsService:
         """Returns snapshot history ordered by generated_at descending."""
         stmt = (
             select(AnalyticsSnapshot)
+            .options(selectinload(AnalyticsSnapshot.insights))
             .where(AnalyticsSnapshot.user_id == user_id)
             .order_by(AnalyticsSnapshot.generated_at.desc())
         )
@@ -452,6 +452,7 @@ class AnalyticsService:
         """Returns insights for the latest snapshot."""
         stmt = (
             select(AnalyticsSnapshot)
+            .options(selectinload(AnalyticsSnapshot.insights))
             .where(AnalyticsSnapshot.user_id == user_id)
             .order_by(AnalyticsSnapshot.generated_at.desc())
             .limit(1)
@@ -462,9 +463,7 @@ class AnalyticsService:
             snapshot, insights = await self.generate_snapshot(user_id)
             return insights
 
-        stmt_insights = select(AnalyticsInsight).where(AnalyticsInsight.snapshot_id == snapshot.id)
-        res_insights = await self.db.execute(stmt_insights)
-        return list(res_insights.scalars().all())
+        return list(snapshot.insights)
 
     async def _compute_resume_intelligence(self, user_id: uuid.UUID) -> dict:
         """Helper to calculate best/worst/highest ATS/highest match resume versions."""

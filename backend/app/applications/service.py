@@ -4,6 +4,7 @@ import uuid
 from datetime import datetime, timezone
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 from fastapi import HTTPException
 
 from app.applications.models import Application, ApplicationPackage, OutcomeEvent, JobApplication, ApplicationTimelineEvent, OutcomeType
@@ -152,13 +153,19 @@ class ApplicationTrackingService:
         try:
             self.db.add(application)
             await self.db.commit()
-            await self.db.refresh(application)
         except Exception as e:
             logger.error(f"Failed to create application: {str(e)}", exc_info=True)
             await self.db.rollback()
             raise HTTPException(status_code=500, detail="Failed to save application tracking record.")
 
-        return application
+        # Re-fetch with eager loading to avoid MissingGreenlet on timeline_events
+        stmt_reload = (
+            select(JobApplication)
+            .options(selectinload(JobApplication.timeline_events))
+            .where(JobApplication.id == application.id)
+        )
+        res_reload = await self.db.execute(stmt_reload)
+        return res_reload.scalar_one()
 
     async def update_status(
         self, user_id: uuid.UUID, application_id: uuid.UUID, new_status: str, notes: str | None = None, outcome_type: str | None = None
@@ -255,6 +262,7 @@ class ApplicationTrackingService:
         """Fetch application with ownership and soft-delete checks."""
         stmt = (
             select(JobApplication)
+            .options(selectinload(JobApplication.timeline_events))
             .join(Job, JobApplication.job_id == Job.id)
             .join(ResumeVersion, JobApplication.resume_version_id == ResumeVersion.id)
             .where(
@@ -274,6 +282,7 @@ class ApplicationTrackingService:
         """List user applications. Excludes those with soft-deleted jobs/resumes."""
         stmt = (
             select(JobApplication)
+            .options(selectinload(JobApplication.timeline_events))
             .join(Job, JobApplication.job_id == Job.id)
             .join(ResumeVersion, JobApplication.resume_version_id == ResumeVersion.id)
             .where(
