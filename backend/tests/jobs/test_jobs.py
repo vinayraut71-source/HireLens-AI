@@ -475,3 +475,142 @@ async def test_match_score_ranges(client: AsyncClient, auth_headers: dict, parse
     for field in ["overall_match_score", "skills_match_score", "experience_match_score",
                    "education_match_score", "keyword_match_score"]:
         assert 0 <= data[field] <= 100, f"{field}={data[field]} out of range"
+
+
+# =============================================================================
+# Skill Gap Analysis Tests (Sprint 6)
+# =============================================================================
+
+
+async def test_skill_gap_generation_success(
+    client: AsyncClient, auth_headers: dict, parsed_resume_version_id: str
+):
+    """Test generating skill gap analysis for a job match."""
+    # Create a Java job (has gaps compared to Python resume)
+    job_resp = await client.post("/api/v1/jobs", json={
+        "title": "Java Backend Engineer",
+        "description": JOB_DESCRIPTION_JAVA,
+        "company": "TechCorp",
+    }, headers=auth_headers)
+    assert job_resp.status_code == 201
+    job_id = job_resp.json()["id"]
+
+    # Match resume against job
+    match_resp = await client.post(f"/api/v1/jobs/{job_id}/match", json={
+        "resume_version_id": parsed_resume_version_id,
+    }, headers=auth_headers)
+    assert match_resp.status_code == 201
+    match_id = match_resp.json()["id"]
+
+    # Generate skill gap analysis
+    gap_resp = await client.post(f"/api/v1/jobs/matches/{match_id}/skill-gap", headers=auth_headers)
+    assert gap_resp.status_code == 201
+    data = gap_resp.json()
+
+    assert data["job_match_id"] == match_id
+    assert data["total_gaps"] > 0
+    assert data["critical_count"] + data["high_count"] + data["medium_count"] + data["low_count"] == data["total_gaps"]
+    assert isinstance(data["gaps"], list)
+    assert len(data["gaps"]) == data["total_gaps"]
+
+    # Verify gap details
+    gap = data["gaps"][0]
+    assert "id" in gap
+    assert gap["job_match_id"] == match_id
+    assert "missing_skill" in gap
+    assert 0 <= gap["importance_score"] <= 100
+    assert gap["category"] in ["technical", "soft-skill", "certification", "tool", "domain"]
+    assert gap["learning_priority"] in ["critical", "high", "medium", "low"]
+    assert "estimated_learning_time" in gap
+    assert "recommendation_reason" in gap
+    assert "roadmap_priority_score" in gap
+    assert 0 <= gap["roadmap_priority_score"] <= 100
+
+
+async def test_skill_gap_cache_reuse(
+    client: AsyncClient, auth_headers: dict, parsed_resume_version_id: str
+):
+    """Test that consecutive POST requests return cached skill gap analysis."""
+    job_resp = await client.post("/api/v1/jobs", json={
+        "title": "Java Role",
+        "description": JOB_DESCRIPTION_JAVA,
+    }, headers=auth_headers)
+    job_id = job_resp.json()["id"]
+
+    match_resp = await client.post(f"/api/v1/jobs/{job_id}/match", json={
+        "resume_version_id": parsed_resume_version_id,
+    }, headers=auth_headers)
+    match_id = match_resp.json()["id"]
+
+    # Generate first time
+    gap1_resp = await client.post(f"/api/v1/jobs/matches/{match_id}/skill-gap", headers=auth_headers)
+    assert gap1_resp.status_code == 201
+    data1 = gap1_resp.json()
+
+    # Generate second time — should be identical cached result
+    gap2_resp = await client.post(f"/api/v1/jobs/matches/{match_id}/skill-gap", headers=auth_headers)
+    assert gap2_resp.status_code == 201
+    data2 = gap2_resp.json()
+
+    assert data1["total_gaps"] == data2["total_gaps"]
+    assert [g["id"] for g in data1["gaps"]] == [g["id"] for g in data2["gaps"]]
+
+
+async def test_skill_gap_get_success(
+    client: AsyncClient, auth_headers: dict, parsed_resume_version_id: str
+):
+    """Test getting generated skill gaps."""
+    job_resp = await client.post("/api/v1/jobs", json={
+        "title": "Java Role",
+        "description": JOB_DESCRIPTION_JAVA,
+    }, headers=auth_headers)
+    job_id = job_resp.json()["id"]
+
+    match_resp = await client.post(f"/api/v1/jobs/{job_id}/match", json={
+        "resume_version_id": parsed_resume_version_id,
+    }, headers=auth_headers)
+    match_id = match_resp.json()["id"]
+
+    # Before generating, GET might be empty or cached. But let's generate first.
+    await client.post(f"/api/v1/jobs/matches/{match_id}/skill-gap", headers=auth_headers)
+
+    # Fetch gaps
+    get_resp = await client.get(f"/api/v1/jobs/matches/{match_id}/skill-gap", headers=auth_headers)
+    assert get_resp.status_code == 200
+    data = get_resp.json()
+    assert data["job_match_id"] == match_id
+    assert data["total_gaps"] > 0
+
+
+async def test_skill_gap_ownership_isolation(
+    client: AsyncClient, auth_headers: dict, second_auth_headers: dict, parsed_resume_version_id: str
+):
+    """Test that a user cannot access another user's skill gap analysis."""
+    job_resp = await client.post("/api/v1/jobs", json={
+        "title": "Java Role",
+        "description": JOB_DESCRIPTION_JAVA,
+    }, headers=auth_headers)
+    job_id = job_resp.json()["id"]
+
+    match_resp = await client.post(f"/api/v1/jobs/{job_id}/match", json={
+        "resume_version_id": parsed_resume_version_id,
+    }, headers=auth_headers)
+    match_id = match_resp.json()["id"]
+
+    # Generate gaps as User 1
+    await client.post(f"/api/v1/jobs/matches/{match_id}/skill-gap", headers=auth_headers)
+
+    # User 2 tries to GET
+    get_resp = await client.get(f"/api/v1/jobs/matches/{match_id}/skill-gap", headers=second_auth_headers)
+    assert get_resp.status_code == 404
+
+    # User 2 tries to POST
+    post_resp = await client.post(f"/api/v1/jobs/matches/{match_id}/skill-gap", headers=second_auth_headers)
+    assert post_resp.status_code == 404
+
+
+async def test_skill_gap_invalid_match_id(client: AsyncClient, auth_headers: dict):
+    """Test accessing skill gaps for a non-existent match ID."""
+    fake_match_id = "00000000-0000-0000-0000-000000000000"
+    resp = await client.get(f"/api/v1/jobs/matches/{fake_match_id}/skill-gap", headers=auth_headers)
+    assert resp.status_code == 404

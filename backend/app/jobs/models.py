@@ -86,3 +86,26 @@ class JobMatch(BaseModel):
     __table_args__ = (
         Index("ix_job_matches_user_job_version", "user_id", "job_id", "resume_version_id"),
     )
+
+
+class SkillGapAnalysis(BaseModel):
+    """Sprint 6: Skill Gap Intelligence Engine. Per-skill gap analysis tied to a JobMatch."""
+    __tablename__ = "skill_gap_analyses"
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    resume_version_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("resume_versions.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    job_match_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("job_matches.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    missing_skill: Mapped[str] = mapped_column(String(255), nullable=False)
+    importance_score: Mapped[int] = mapped_column(Integer, nullable=False)
+    category: Mapped[str] = mapped_column(String(50), nullable=False)
+    learning_priority: Mapped[str] = mapped_column(String(20), nullable=False)
+    estimated_learning_time: Mapped[str] = mapped_column(String(100), nullable=False)
+    recommendation_reason: Mapped[str] = mapped_column(Text, nullable=False)
+    roadmap_priority_score: Mapped[int] = mapped_column(Integer, nullable=False)
+

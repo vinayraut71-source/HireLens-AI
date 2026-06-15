@@ -1,4 +1,4 @@
-"""Jobs module — service layer. Sprint 5: Job CRUD + Intelligent Job Matching."""
+"""Jobs module — service layer. Sprint 5: Job CRUD + Intelligent Job Matching. Sprint 6: Skill Gap Intelligence."""
 import re
 import hashlib
 import logging
@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from fastapi import HTTPException
 
-from app.jobs.models import Job, JobMatch
+from app.jobs.models import Job, JobMatch, SkillGapAnalysis
 from app.resumes.models import ResumeProfile, ResumeVersion, ATSAnalysis
 from app.resumes.service import (
     JobDescriptionAnalyzer,
@@ -473,4 +473,318 @@ class JobMatchingService:
             "weaknesses": weaknesses,
             "fit_summary": fit_summary,
             "improvement_actions": improvement_actions,
+        }
+
+
+class SkillGapService:
+    """
+    Sprint 6: Skill Gap Intelligence Engine.
+
+    For each missing skill in a JobMatch, deterministically computes:
+      - importance_score (0-100) based on JD frequency, ATS impact, match score impact
+      - category (technical, soft-skill, certification, domain, tool)
+      - learning_priority (critical, high, medium, low)
+      - estimated_learning_time
+      - recommendation_reason
+
+    All scoring is deterministic. No Gemini / LLM calls.
+    Results are idempotent (cached by job_match_id).
+    """
+
+    # Category classification keywords
+    TECHNICAL_SKILLS = {
+        "python", "java", "javascript", "typescript", "c++", "c#", "go", "rust", "ruby", "php",
+        "react", "angular", "vue", "next.js", "node.js", "express", "django", "fastapi", "flask",
+        "spring boot", "dotnet", "sql", "postgresql", "mysql", "mongodb", "redis", "elasticsearch",
+        "html", "css", "graphql", "rest api", "machine learning", "deep learning", "nlp",
+        "artificial intelligence", "data science", "pandas", "numpy", "tensorflow", "pytorch",
+    }
+    TOOL_SKILLS = {
+        "docker", "kubernetes", "aws", "azure", "gcp", "git", "ci/cd", "jira", "linux",
+    }
+    CERT_SKILLS = {
+        "aws certified", "pmp", "csm", "cissp", "ccna", "comptia", "itil", "certified scrummaster",
+    }
+    SOFT_SKILLS = {
+        "agile", "scrum", "leadership", "communication", "teamwork", "problem solving",
+    }
+
+    # Learning time estimates by category
+    LEARNING_TIMES = {
+        "technical": {"critical": "3-6 months", "high": "2-4 months", "medium": "1-2 months", "low": "2-4 weeks"},
+        "tool": {"critical": "2-4 months", "high": "1-3 months", "medium": "2-6 weeks", "low": "1-2 weeks"},
+        "certification": {"critical": "2-4 months", "high": "1-3 months", "medium": "1-2 months", "low": "2-4 weeks"},
+        "soft-skill": {"critical": "1-3 months", "high": "2-6 weeks", "medium": "1-4 weeks", "low": "1-2 weeks"},
+        "domain": {"critical": "3-6 months", "high": "2-4 months", "medium": "1-2 months", "low": "2-4 weeks"},
+    }
+
+    def __init__(self, db: AsyncSession):
+        self.db = db
+
+    async def analyze_gaps(
+        self, user_id: uuid.UUID, match_id: uuid.UUID
+    ) -> list[SkillGapAnalysis]:
+        """
+        Generate skill gap analysis for a given job match.
+
+        Steps:
+        1. Validate match ownership.
+        2. Check for cached gaps (idempotent).
+        3. Fetch the job description and parse it.
+        4. For each missing skill, compute importance, category, priority.
+        5. Persist and return.
+        """
+        # --- 1. Validate match ownership ---
+        job_match = await self._get_match(user_id, match_id)
+
+        # --- 2. Check cache ---
+        cached = await self._get_cached_gaps(match_id)
+        if cached:
+            return cached
+
+        # --- 3. Get job description and analyze ---
+        job = await self._get_job(user_id, job_match.job_id)
+        jd_analysis = JobDescriptionAnalyzer.analyze(job.description)
+        jd_text_lower = job.description.lower()
+
+        # --- 4. Get ATS analysis for impact data ---
+        ats_analysis = await self._get_ats_analysis(job_match.resume_version_id, job.description)
+
+        # --- 5. Compute gaps for each missing skill ---
+        missing_skills = job_match.missing_skills or []
+        if not missing_skills:
+            return []
+
+        gap_records = []
+        for skill in missing_skills:
+            gap_data = self._compute_gap(
+                skill=skill,
+                jd_text_lower=jd_text_lower,
+                jd_analysis=jd_analysis,
+                ats_analysis=ats_analysis,
+                job_match=job_match,
+            )
+            record = SkillGapAnalysis(
+                user_id=user_id,
+                resume_version_id=job_match.resume_version_id,
+                job_match_id=match_id,
+                missing_skill=skill,
+                importance_score=gap_data["importance_score"],
+                category=gap_data["category"],
+                learning_priority=gap_data["learning_priority"],
+                estimated_learning_time=gap_data["estimated_learning_time"],
+                recommendation_reason=gap_data["recommendation_reason"],
+                roadmap_priority_score=gap_data["roadmap_priority_score"],
+            )
+            gap_records.append(record)
+
+        # Sort by roadmap_priority_score descending before persisting
+        gap_records.sort(key=lambda g: g.roadmap_priority_score, reverse=True)
+
+        # --- 6. Persist ---
+        try:
+            self.db.add_all(gap_records)
+            await self.db.commit()
+            for r in gap_records:
+                await self.db.refresh(r)
+        except Exception as e:
+            logger.error(
+                f"Failed to save skill gap analysis for match {match_id}: {str(e)}",
+                exc_info=True,
+            )
+            await self.db.rollback()
+            raise HTTPException(status_code=500, detail="Failed to save skill gap analysis.")
+
+        return gap_records
+
+    async def get_gaps(
+        self, user_id: uuid.UUID, match_id: uuid.UUID
+    ) -> list[SkillGapAnalysis]:
+        """Retrieve skill gap analysis for a match. Ownership enforced."""
+        await self._get_match(user_id, match_id)
+        return await self._get_cached_gaps(match_id)
+
+    # -------------------------------------------------------------------------
+    # Internal helpers
+    # -------------------------------------------------------------------------
+
+    async def _get_match(self, user_id: uuid.UUID, match_id: uuid.UUID) -> JobMatch:
+        """Fetch job match with ownership check."""
+        stmt = select(JobMatch).where(
+            JobMatch.id == match_id,
+            JobMatch.user_id == user_id,
+        )
+        result = await self.db.execute(stmt)
+        match = result.scalar_one_or_none()
+        if not match:
+            raise HTTPException(status_code=404, detail="Job match not found")
+        return match
+
+    async def _get_job(self, user_id: uuid.UUID, job_id: uuid.UUID) -> Job:
+        """Fetch job with ownership and soft-delete check."""
+        stmt = select(Job).where(
+            Job.id == job_id,
+            Job.user_id == user_id,
+            Job.is_deleted == False,
+        )
+        result = await self.db.execute(stmt)
+        job = result.scalar_one_or_none()
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found")
+        return job
+
+    async def _get_cached_gaps(self, match_id: uuid.UUID) -> list[SkillGapAnalysis]:
+        """Return cached gap analysis for a match, ordered by roadmap_priority_score desc."""
+        stmt = (
+            select(SkillGapAnalysis)
+            .where(SkillGapAnalysis.job_match_id == match_id)
+            .order_by(SkillGapAnalysis.roadmap_priority_score.desc())
+        )
+        result = await self.db.execute(stmt)
+        return list(result.scalars().all())
+
+    async def _get_ats_analysis(
+        self, version_id: uuid.UUID, job_description: str
+    ) -> ATSAnalysis | None:
+        """Look up cached ATS analysis for scoring context."""
+        import hashlib
+        jd_hash = hashlib.sha256(job_description.strip().encode("utf-8")).hexdigest()
+        stmt = select(ATSAnalysis).where(
+            ATSAnalysis.resume_version_id == version_id,
+            ATSAnalysis.job_description_hash == jd_hash,
+        )
+        result = await self.db.execute(stmt)
+        return result.scalar_one_or_none()
+
+    @classmethod
+    def _classify_category(cls, skill: str) -> str:
+        """Classify a skill into a category."""
+        skill_lower = skill.lower().strip()
+        if skill_lower in cls.CERT_SKILLS:
+            return "certification"
+        if skill_lower in cls.TOOL_SKILLS:
+            return "tool"
+        if skill_lower in cls.SOFT_SKILLS:
+            return "soft-skill"
+        if skill_lower in cls.TECHNICAL_SKILLS:
+            return "technical"
+        return "domain"
+
+    @classmethod
+    def _compute_gap(
+        cls,
+        skill: str,
+        jd_text_lower: str,
+        jd_analysis: dict,
+        ats_analysis: ATSAnalysis | None,
+        job_match: JobMatch,
+    ) -> dict:
+        """
+        Deterministic computation for a single missing skill.
+
+        importance_score = (jd_frequency_score * 0.4) + (ats_impact * 0.35) + (match_impact * 0.25)
+        """
+        skill_lower = skill.lower().strip()
+
+        # --- JD Frequency Score (0-100) ---
+        # Count occurrences of the skill in the job description
+        occurrences = len(re.findall(rf"\b{re.escape(skill_lower)}\b", jd_text_lower))
+        # Normalize: 1 mention = 30, 2 = 55, 3 = 75, 4+ = 90, in required section = +10
+        if occurrences == 0:
+            jd_freq_score = 20  # Still listed as required skill by analyzer
+        elif occurrences == 1:
+            jd_freq_score = 30
+        elif occurrences == 2:
+            jd_freq_score = 55
+        elif occurrences == 3:
+            jd_freq_score = 75
+        else:
+            jd_freq_score = 90
+
+        # Boost if in required_skills list
+        required_skills = [s.lower() for s in jd_analysis.get("required_skills", [])]
+        if skill_lower in required_skills:
+            jd_freq_score = min(100, jd_freq_score + 10)
+
+        # --- ATS Impact Score (0-100) ---
+        ats_impact = 50  # default
+        if ats_analysis:
+            missing_kw = [k.lower() for k in (ats_analysis.missing_keywords or [])]
+            if skill_lower in missing_kw:
+                ats_impact = 80  # This skill is a missing keyword in ATS
+            missing_sk = [s.lower() for s in (ats_analysis.missing_skills or [])]
+            if skill_lower in missing_sk:
+                ats_impact = max(ats_impact, 85)  # Missing from ATS skill analysis
+
+        # --- Match Score Impact (0-100) ---
+        # How much would adding this skill improve the match score?
+        total_required = len(jd_analysis.get("required_skills", []))
+        if total_required > 0:
+            # Each missing required skill reduces skills_match_score proportionally
+            per_skill_impact = (100.0 / total_required) * 0.8  # 80% weight on required
+            match_impact = min(100, round(per_skill_impact * 1.5))  # Amplify for significance
+        else:
+            match_impact = 30
+
+        # --- Weighted Importance Score ---
+        importance_score = round(
+            0.40 * jd_freq_score + 0.35 * ats_impact + 0.25 * match_impact
+        )
+        importance_score = max(0, min(100, importance_score))
+
+        # --- Category ---
+        category = cls._classify_category(skill)
+
+        # --- Learning Priority ---
+        if importance_score >= 80:
+            learning_priority = "critical"
+        elif importance_score >= 60:
+            learning_priority = "high"
+        elif importance_score >= 40:
+            learning_priority = "medium"
+        else:
+            learning_priority = "low"
+
+        # --- Estimated Learning Time ---
+        category_times = cls.LEARNING_TIMES.get(category, cls.LEARNING_TIMES["domain"])
+        estimated_learning_time = category_times.get(learning_priority, "1-2 months")
+
+        # --- Recommendation Reason ---
+        reasons = []
+        if skill_lower in required_skills:
+            reasons.append(f"{skill} is listed as a required skill in the job description")
+        if occurrences >= 2:
+            reasons.append(f"mentioned {occurrences} times in the JD")
+        if ats_analysis and skill_lower in [k.lower() for k in (ats_analysis.missing_keywords or [])]:
+            reasons.append("flagged as a missing ATS keyword")
+        if importance_score >= 70:
+            reasons.append("has high impact on match score improvement")
+
+        if reasons:
+            recommendation_reason = f"{skill}: {'; '.join(reasons)}. Closing this gap would strengthen your candidacy."
+        else:
+            recommendation_reason = f"{skill}: Acquiring this skill would improve overall role alignment."
+
+        # --- Learning Effort (Quantified for Roadmap score) ---
+        priority_effort_map = {
+            "critical": 80,
+            "high": 60,
+            "medium": 40,
+            "low": 20
+        }
+        effort_score = priority_effort_map.get(learning_priority, 50)
+
+        # --- Roadmap Priority Score (0-100) ---
+        roadmap_priority_score = round(
+            0.40 * ats_impact + 0.40 * match_impact + 0.20 * (100 - effort_score)
+        )
+        roadmap_priority_score = max(0, min(100, roadmap_priority_score))
+
+        return {
+            "importance_score": importance_score,
+            "category": category,
+            "learning_priority": learning_priority,
+            "estimated_learning_time": estimated_learning_time,
+            "recommendation_reason": recommendation_reason,
+            "roadmap_priority_score": roadmap_priority_score,
         }

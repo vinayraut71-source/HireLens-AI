@@ -14,8 +14,10 @@ from app.jobs.schemas import (
     JobMatchResponse,
     JobMatchListResponse,
     SkillGapResponse,
+    SkillGapSummaryResponse,
+    SkillGapAnalysisResponse,
 )
-from app.jobs.service import JobService, JobMatchingService
+from app.jobs.service import JobService, JobMatchingService, SkillGapService
 
 router = APIRouter(prefix="/jobs", tags=["Jobs & Matching"])
 
@@ -146,7 +148,70 @@ async def get_match(
     return await service.get_match(current_user.id, match_id)
 
 
-# --- Skill Gap Endpoints (PRD 8.6, placeholder for Sprint 6) ---
+# --- Skill Gap Endpoints (PRD 8.6 + Sprint 6) ---
+
+@router.post(
+    "/matches/{match_id}/skill-gap",
+    response_model=SkillGapSummaryResponse,
+    status_code=201,
+    summary="Analyze skill gaps for a job match",
+    description="Generates or retrieves the cached skill gap analysis for a specific job match.",
+    tags=["Skill Gaps"],
+)
+async def analyze_skill_gaps(
+    match_id: UUID,
+    db: DBSession,
+    current_user: Annotated[User, Depends(get_current_active_user)],
+):
+    service = SkillGapService(db)
+    gaps = await service.analyze_gaps(current_user.id, match_id)
+    
+    critical_count = sum(1 for g in gaps if g.learning_priority == "critical")
+    high_count = sum(1 for g in gaps if g.learning_priority == "high")
+    medium_count = sum(1 for g in gaps if g.learning_priority == "medium")
+    low_count = sum(1 for g in gaps if g.learning_priority == "low")
+    
+    return SkillGapSummaryResponse(
+        job_match_id=match_id,
+        total_gaps=len(gaps),
+        critical_count=critical_count,
+        high_count=high_count,
+        medium_count=medium_count,
+        low_count=low_count,
+        gaps=[SkillGapAnalysisResponse.model_validate(g) for g in gaps],
+    )
+
+
+@router.get(
+    "/matches/{match_id}/skill-gap",
+    response_model=SkillGapSummaryResponse,
+    summary="Get skill gaps for a job match",
+    description="Retrieves the cached skill gap analysis for a specific job match.",
+    tags=["Skill Gaps"],
+)
+async def get_skill_gaps(
+    match_id: UUID,
+    db: DBSession,
+    current_user: Annotated[User, Depends(get_current_active_user)],
+):
+    service = SkillGapService(db)
+    gaps = await service.get_gaps(current_user.id, match_id)
+    
+    critical_count = sum(1 for g in gaps if g.learning_priority == "critical")
+    high_count = sum(1 for g in gaps if g.learning_priority == "high")
+    medium_count = sum(1 for g in gaps if g.learning_priority == "medium")
+    low_count = sum(1 for g in gaps if g.learning_priority == "low")
+    
+    return SkillGapSummaryResponse(
+        job_match_id=match_id,
+        total_gaps=len(gaps),
+        critical_count=critical_count,
+        high_count=high_count,
+        medium_count=medium_count,
+        low_count=low_count,
+        gaps=[SkillGapAnalysisResponse.model_validate(g) for g in gaps],
+    )
+
 
 @router.get(
     "/skill-gaps",

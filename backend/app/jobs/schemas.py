@@ -115,3 +115,36 @@ class SkillGapResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+# --- Skill Gap Analysis Schemas (Sprint 6) ---
+
+class SkillGapAnalysisResponse(BaseModel):
+    """Response for a single skill gap analysis item."""
+    id: UUID
+    user_id: UUID
+    resume_version_id: UUID
+    job_match_id: UUID
+    missing_skill: str
+    importance_score: int
+    category: str
+    learning_priority: str
+    estimated_learning_time: str
+    recommendation_reason: str
+    roadmap_priority_score: int
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class SkillGapSummaryResponse(BaseModel):
+    """Aggregated response for POST/GET skill-gap endpoints."""
+    job_match_id: UUID
+    total_gaps: int
+    critical_count: int
+    high_count: int
+    medium_count: int
+    low_count: int
+    gaps: list[SkillGapAnalysisResponse]
+
