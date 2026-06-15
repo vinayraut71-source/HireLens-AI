@@ -13,8 +13,9 @@ from app.resumes.models import (
     ResumeVersionEmbedding,
     AtsScoreHistory,
     MatchScoreHistory,
+    ATSAnalysis,
 )
-from app.jobs.models import Job, JobEmbedding, MatchResult, SkillGap
+from app.jobs.models import Job, JobEmbedding, MatchResult, SkillGap, JobMatch
 from app.applications.models import Application, ApplicationPackage, OutcomeEvent
 from app.analytics.models import UserAnalyticsSnapshot
 from app.audit.models import AgentAuditLog

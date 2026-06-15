@@ -10,6 +10,8 @@ from app.resumes.schemas import (
     ResumeVersionResponse,
     ActivateVersionRequest,
     ResumeParsedResponse,
+    AtsScoreRequest,
+    ATSAnalysisResponse,
 )
 from app.resumes.service import ResumeStorageService, ResumeVersionService
 
@@ -156,5 +158,41 @@ async def get_parsed_data(
 ):
     version_service = ResumeVersionService(db, ResumeStorageService())
     return await version_service.get_parsed_data(current_user.id, version_id)
+
+
+@router.post(
+    "/{version_id}/ats-score",
+    response_model=ATSAnalysisResponse,
+    summary="Compute ATS score against a job description",
+    description="Deterministic rules-based scoring of a resume version against the provided job description text."
+)
+async def compute_ats_score(
+    version_id: UUID,
+    body: AtsScoreRequest,
+    db: DBSession,
+    current_user: Annotated[User, Depends(get_current_active_user)]
+):
+    version_service = ResumeVersionService(db, ResumeStorageService())
+    return await version_service.analyze_ats(
+        user_id=current_user.id,
+        version_id=version_id,
+        job_description=body.job_description
+    )
+
+
+@router.get(
+    "/{version_id}/ats-history",
+    response_model=list[ATSAnalysisResponse],
+    summary="Retrieve ATS analysis history",
+    description="Lists all historical ATS analysis results for this resume version, sorted by creation date."
+)
+async def get_ats_history(
+    version_id: UUID,
+    db: DBSession,
+    current_user: Annotated[User, Depends(get_current_active_user)]
+):
+    version_service = ResumeVersionService(db, ResumeStorageService())
+    return await version_service.list_ats_history(current_user.id, version_id)
+
 
 

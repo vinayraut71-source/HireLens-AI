@@ -6,13 +6,15 @@ import boto3
 import logging
 import pdfplumber
 from docx import Document
+from datetime import datetime
 from botocore.exceptions import ClientError
+import hashlib
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from fastapi import HTTPException
 
 from app.core.config import settings
-from app.resumes.models import ResumeProfile, ResumeVersion
+from app.resumes.models import ResumeProfile, ResumeVersion, ATSAnalysis
 
 logger = logging.getLogger(__name__)
 
@@ -393,6 +395,348 @@ class ResumeVersionService:
             "experience": version.experience,
             "skills": version.skills,
             "certifications": version.certifications,
+        }
+
+    async def analyze_ats(self, user_id: uuid.UUID, version_id: uuid.UUID, job_description: str) -> ATSAnalysis:
+        # Fetch version and check profile/version soft-delete
+        stmt = (
+            select(ResumeVersion)
+            .join(ResumeProfile, ResumeVersion.profile_id == ResumeProfile.id)
+            .where(
+                ResumeVersion.id == version_id,
+                ResumeVersion.user_id == user_id,
+                ResumeVersion.is_deleted == False,
+                ResumeProfile.is_deleted == False
+            )
+        )
+        result = await self.db.execute(stmt)
+        version = result.scalar_one_or_none()
+        if not version:
+            raise HTTPException(status_code=404, detail="Resume version not found")
+
+        # Compute job description hash
+        jd_clean = job_description.strip()
+        if not jd_clean:
+            raise HTTPException(status_code=400, detail="Job description cannot be empty")
+        if len(jd_clean) > 50000:
+            raise HTTPException(status_code=400, detail="Job description exceeds the maximum length of 50,000 characters.")
+        jd_hash = hashlib.sha256(jd_clean.encode('utf-8')).hexdigest()
+
+        # Check cache (idempotent scoring)
+        cache_stmt = select(ATSAnalysis).where(
+            ATSAnalysis.resume_version_id == version_id,
+            ATSAnalysis.job_description_hash == jd_hash
+        )
+        cache_result = await self.db.execute(cache_stmt)
+        cached_analysis = cache_result.scalar_one_or_none()
+        if cached_analysis:
+            return cached_analysis
+
+        # Perform scoring
+        jd_analysis = JobDescriptionAnalyzer.analyze(jd_clean)
+        scores = ATSScoringService.score(version, jd_analysis)
+
+        # Save the analysis
+        analysis = ATSAnalysis(
+            resume_version_id=version_id,
+            job_description_hash=jd_hash,
+            ats_score=scores["ats_score"],
+            keyword_score=scores["keyword_score"],
+            skills_score=scores["skills_score"],
+            experience_score=scores["experience_score"],
+            education_score=scores["education_score"],
+            missing_keywords=scores["missing_keywords"],
+            matched_keywords=scores["matched_keywords"],
+            recommendations=scores["recommendations"],
+            matched_skills=scores["matched_skills"],
+            missing_skills=scores["missing_skills"],
+            resume_strengths=scores["resume_strengths"],
+            resume_weaknesses=scores["resume_weaknesses"],
+            matched_sections=scores["matched_sections"]
+        )
+
+        try:
+            self.db.add(analysis)
+            await self.db.commit()
+            await self.db.refresh(analysis)
+        except Exception as e:
+            logger.error(f"Failed to save ATS analysis for version {version_id}: {str(e)}", exc_info=True)
+            await self.db.rollback()
+            raise HTTPException(status_code=500, detail="Failed to save ATS analysis to database.")
+
+        return analysis
+
+    async def list_ats_history(self, user_id: uuid.UUID, version_id: uuid.UUID) -> list[ATSAnalysis]:
+        # Validate ownership and soft delete status
+        stmt = (
+            select(ResumeVersion)
+            .join(ResumeProfile, ResumeVersion.profile_id == ResumeProfile.id)
+            .where(
+                ResumeVersion.id == version_id,
+                ResumeVersion.user_id == user_id,
+                ResumeVersion.is_deleted == False,
+                ResumeProfile.is_deleted == False
+            )
+        )
+        result = await self.db.execute(stmt)
+        version = result.scalar_one_or_none()
+        if not version:
+            raise HTTPException(status_code=404, detail="Resume version not found")
+
+        # Fetch history ordered by created_at desc
+        history_stmt = select(ATSAnalysis).where(
+            ATSAnalysis.resume_version_id == version_id
+        ).order_by(ATSAnalysis.created_at.desc())
+        history_result = await self.db.execute(history_stmt)
+        return list(history_result.scalars().all())
+
+    @staticmethod
+    def _estimate_experience_years(resume_version: ResumeVersion) -> int:
+        if not resume_version.experience:
+            return 0
+        total_years = 0
+        current_year = datetime.now().year
+        for exp in resume_version.experience:
+            years = re.findall(r'\b(19\d\d|20\d\d)\b', exp)
+            if len(years) >= 2:
+                try:
+                    y1, y2 = int(years[0]), int(years[1])
+                    total_years += min(15, abs(y2 - y1))
+                except ValueError:
+                    pass
+            elif len(years) == 1:
+                if any(pw in exp.lower() for pw in ["present", "current", "now", "ongoing"]):
+                    try:
+                        y1 = int(years[0])
+                        if y1 <= current_year:
+                            total_years += min(15, abs(current_year - y1))
+                    except ValueError:
+                        pass
+                else:
+                    total_years += 1
+        return total_years if total_years > 0 else len(resume_version.experience)
+
+    @staticmethod
+    def _estimate_education_level(education_list: list) -> int:
+        if not education_list:
+            return 0
+        highest = 0
+        for edu in education_list:
+            edu_lower = edu.lower()
+            if "phd" in edu_lower or "ph.d" in edu_lower or "doctorate" in edu_lower:
+                highest = max(highest, 3)
+            elif "master" in edu_lower or "ms" in edu_lower or "m.s." in edu_lower or "mba" in edu_lower:
+                highest = max(highest, 2)
+            elif "bachelor" in edu_lower or "bs" in edu_lower or "b.s." in edu_lower or "degree" in edu_lower or "university" in edu_lower or "college" in edu_lower:
+                highest = max(highest, 1)
+        return highest
+
+
+class JobDescriptionAnalyzer:
+    """Helper service to parse job description text deterministically."""
+
+    COMMON_KEYWORDS = [
+        "python", "java", "javascript", "typescript", "c++", "c#", "go", "rust", "ruby", "php",
+        "react", "angular", "vue", "next.js", "node.js", "express", "django", "fastapi", "flask",
+        "spring boot", "dotnet", "aws", "azure", "gcp", "docker", "kubernetes", "sql", "postgresql",
+        "mysql", "mongodb", "redis", "elasticsearch", "git", "ci/cd", "agile", "scrum", "jira",
+        "machine learning", "deep learning", "nlp", "artificial intelligence", "data science",
+        "pandas", "numpy", "tensorflow", "pytorch", "html", "css", "linux", "rest api", "graphql"
+    ]
+
+    CERTIFICATION_KEYWORDS = [
+        "AWS Certified", "PMP", "CSM", "CISSP", "CCNA", "CompTIA", "ITIL", "Certified ScrumMaster"
+    ]
+
+    @classmethod
+    def analyze(cls, text: str) -> dict:
+        text_lower = text.lower()
+        keywords = [kw for kw in cls.COMMON_KEYWORDS if re.search(rf"\b{re.escape(kw)}\b", text_lower)]
+
+        required_skills = set()
+        preferred_skills = set()
+        
+        lines = [line.strip() for line in text.split("\n") if line.strip()]
+        for line in lines:
+            line_lower = line.lower()
+            line_kws = [kw for kw in cls.COMMON_KEYWORDS if re.search(rf"\b{re.escape(kw)}\b", line_lower)]
+            if line_kws:
+                is_preferred = any(pw in line_lower for pw in ["preferred", "plus", "nice to have", "desired", "beneficial", "optional", "bonus", "advantage"])
+                if is_preferred:
+                    preferred_skills.update(line_kws)
+                else:
+                    required_skills.update(line_kws)
+
+        preferred_skills = preferred_skills - required_skills
+
+        experience_years = 0
+        exp_matches = re.findall(r'(\d+)\+?\s*(?:to|-)?\s*(\d+)?\s*years?', text_lower)
+        if exp_matches:
+            years_found = []
+            for match in exp_matches:
+                try:
+                    years_found.append(int(match[0]))
+                except ValueError:
+                    pass
+            if years_found:
+                experience_years = max(years_found)
+
+        education_req = "Bachelor's"
+        edu_lower = text_lower
+        if "phd" in edu_lower or "ph.d" in edu_lower or "doctorate" in edu_lower:
+            education_req = "PhD"
+        elif "master" in edu_lower or "ms" in edu_lower or "m.s." in edu_lower:
+            education_req = "Master's"
+        elif "bachelor" in edu_lower or "bs" in edu_lower or "b.s." in edu_lower:
+            education_req = "Bachelor's"
+        elif "any" in edu_lower or "none" in edu_lower or "no degree" in edu_lower:
+            education_req = "None"
+
+        certifications = [cert for cert in cls.CERTIFICATION_KEYWORDS if cert.lower() in text_lower]
+
+        return {
+            "required_skills": list(required_skills),
+            "preferred_skills": list(preferred_skills),
+            "years_of_experience": experience_years,
+            "education_requirements": education_req,
+            "certifications": certifications,
+            "keywords": keywords
+        }
+
+
+class ATSScoringService:
+    """Helper service to compute deterministic ATS score breakdowns."""
+
+    EDU_LEVELS = {"none": 0, "bachelor's": 1, "master's": 2, "phd": 3}
+
+    @classmethod
+    def score(cls, resume_version: ResumeVersion, jd_analysis: dict) -> dict:
+        resume_text_lower = (resume_version.extracted_text or "").lower()
+        
+        # 1. Keywords Match
+        jd_keywords = jd_analysis["keywords"]
+        matched_keywords = []
+        if jd_keywords:
+            matched_keywords = [kw for kw in jd_keywords if re.search(rf"\b{re.escape(kw)}\b", resume_text_lower)]
+        
+        missing_keywords = list(set(jd_keywords) - set(matched_keywords))
+        keyword_score = round((len(matched_keywords) / len(jd_keywords)) * 100) if jd_keywords else 100
+
+        # 2. Skills Match
+        resume_skills_set = {s.lower().strip() for s in (resume_version.skills or [])}
+        required_skills = jd_analysis["required_skills"]
+        preferred_skills = jd_analysis["preferred_skills"]
+
+        matched_required = [s for s in required_skills if any(s.lower() in rs or rs in s.lower() for rs in resume_skills_set)]
+        matched_preferred = [s for s in preferred_skills if any(s.lower() in rs or rs in s.lower() for rs in resume_skills_set)]
+
+        required_score = (len(matched_required) / len(required_skills)) * 100 if required_skills else 100
+        preferred_score = (len(matched_preferred) / len(preferred_skills)) * 100 if preferred_skills else 100
+        skills_score = round(0.8 * required_score + 0.2 * preferred_score)
+
+        # 3. Education Match
+        jd_edu = jd_analysis["education_requirements"]
+        jd_level = cls.EDU_LEVELS.get(jd_edu.lower(), 1)
+        resume_level = ResumeVersionService._estimate_education_level(resume_version.education or [])
+
+        if resume_level >= jd_level:
+            education_score = 100
+        else:
+            education_score = round((resume_level / jd_level) * 100) if jd_level > 0 else 100
+
+        # 4. Experience Match
+        jd_exp_years = jd_analysis["years_of_experience"]
+        resume_exp_years = ResumeVersionService._estimate_experience_years(resume_version)
+
+        if resume_exp_years >= jd_exp_years:
+            experience_score = 100
+        else:
+            experience_score = round((resume_exp_years / jd_exp_years) * 100) if jd_exp_years > 0 else 100
+
+        # Overall Weighted Score
+        ats_score = round(0.3 * keyword_score + 0.3 * skills_score + 0.2 * experience_score + 0.2 * education_score)
+
+        # Matched/Missing Skills (Sprint 4 enhanced)
+        matched_skills = list(set(matched_required) | set(matched_preferred))
+        missing_skills = list(set(required_skills) - set(matched_required))
+
+        # Strengths (Sprint 4 enhanced)
+        strengths = []
+        if experience_score == 100:
+            strengths.append(f"Meets or exceeds required experience level ({jd_exp_years} years).")
+        if education_score == 100:
+            strengths.append(f"Meets required education level: {jd_edu}.")
+        if keyword_score >= 80:
+            strengths.append("Strong keyword alignment with the job description.")
+        if len(matched_required) > 0:
+            strengths.append(f"Possesses key required skills: {', '.join(matched_required[:3])}.")
+        if not strengths:
+            strengths.append("Found basic resume formatting.")
+
+        # Weaknesses (Sprint 4 enhanced)
+        weaknesses = []
+        if experience_score < 100:
+            weaknesses.append(f"Experience level (~{resume_exp_years} years) is below the required {jd_exp_years} years.")
+        if education_score < 100:
+            weaknesses.append(f"Education degree does not meet the preferred/required {jd_edu} level.")
+        if missing_skills:
+            weaknesses.append(f"Missing critical required skills: {', '.join(missing_skills[:3])}.")
+        if keyword_score < 50:
+            weaknesses.append("Low keyword overlap with the role description.")
+        if not weaknesses:
+            weaknesses.append("No critical gaps identified in the resume content.")
+
+        # Matched Sections (Sprint 4 enhanced)
+        matched_sections = []
+        if resume_version.education:
+            matched_sections.append("Education")
+        if resume_version.experience:
+            matched_sections.append("Experience")
+        if resume_version.skills:
+            matched_sections.append("Skills")
+        if resume_version.certifications:
+            matched_sections.append("Certifications")
+        if resume_version.contact_info and (resume_version.contact_info.get("name") or resume_version.contact_info.get("email")):
+            matched_sections.append("Contact Info")
+
+        # Recommendations
+        recommendations = []
+        if keyword_score < 70 and missing_keywords:
+            recommendations.append(f"Add missing keywords: {', '.join(missing_keywords[:5])} to your resume to pass automated screens.")
+        if skills_score < 70 and required_skills:
+            missing_req = list(set(required_skills) - set(matched_required))
+            if missing_req:
+                recommendations.append(f"Incorporate missing required skills such as: {', '.join(missing_req[:5])} into your skills or experience sections.")
+        if experience_score < 100:
+            recommendations.append(f"Your experience section suggests ~{resume_exp_years} years of experience. Highlight more details of your work history to align with the required {jd_exp_years} years.")
+        if education_score < 100:
+            recommendations.append(f"Ensure your academic credentials list the {jd_edu} degree requested by the job description.")
+        
+        # Certifications check
+        jd_certs = jd_analysis["certifications"]
+        if jd_certs:
+            resume_certs_lower = [c.lower() for c in (resume_version.certifications or [])]
+            missing_certs = [cert for cert in jd_certs if cert.lower() not in resume_certs_lower]
+            if missing_certs:
+                recommendations.append(f"Consider adding or obtaining certifications: {', '.join(missing_certs)}.")
+
+        if not recommendations:
+            recommendations.append("Your resume aligns very well with the job description requirements.")
+
+        return {
+            "ats_score": ats_score,
+            "keyword_score": keyword_score,
+            "skills_score": skills_score,
+            "experience_score": experience_score,
+            "education_score": education_score,
+            "missing_keywords": missing_keywords,
+            "matched_keywords": matched_keywords,
+            "recommendations": recommendations,
+            "matched_skills": matched_skills,
+            "missing_skills": missing_skills,
+            "resume_strengths": strengths,
+            "resume_weaknesses": weaknesses,
+            "matched_sections": matched_sections
         }
 
 

@@ -111,3 +111,34 @@ class MatchScoreHistory(BaseModel):
     matched_skills: Mapped[dict] = mapped_column(JSONB, default=list, server_default="[]")
     missing_skills: Mapped[dict] = mapped_column(JSONB, default=list, server_default="[]")
     match_result_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("match_results.id", ondelete="SET NULL"), nullable=True)
+
+
+class ATSAnalysis(BaseModel):
+    """ATS Analysis results for a resume version against a job description. PRD Section 7.2."""
+    __tablename__ = "ats_analyses"
+
+    resume_version_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("resume_versions.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    job_description_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    ats_score: Mapped[int] = mapped_column(Integer, nullable=False)
+    keyword_score: Mapped[int] = mapped_column(Integer, nullable=False)
+    skills_score: Mapped[int] = mapped_column(Integer, nullable=False)
+    experience_score: Mapped[int] = mapped_column(Integer, nullable=False)
+    education_score: Mapped[int] = mapped_column(Integer, nullable=False)
+    missing_keywords: Mapped[dict] = mapped_column(JSONB, default=list, server_default="[]")
+    matched_keywords: Mapped[dict] = mapped_column(JSONB, default=list, server_default="[]")
+    recommendations: Mapped[dict] = mapped_column(JSONB, default=list, server_default="[]")
+
+    # Enhanced design fields
+    matched_skills: Mapped[dict] = mapped_column(JSONB, default=list, server_default="[]")
+    missing_skills: Mapped[dict] = mapped_column(JSONB, default=list, server_default="[]")
+    resume_strengths: Mapped[dict] = mapped_column(JSONB, default=list, server_default="[]")
+    resume_weaknesses: Mapped[dict] = mapped_column(JSONB, default=list, server_default="[]")
+    matched_sections: Mapped[dict] = mapped_column(JSONB, default=list, server_default="[]")
+
+    resume_version: Mapped["ResumeVersion"] = relationship(foreign_keys=[resume_version_id])
+

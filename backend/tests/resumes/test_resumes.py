@@ -338,3 +338,184 @@ async def test_unauthorized_user_cannot_parse_resume(client: AsyncClient, auth_h
     # 4. Attacker tries to access User 1's parsed data
     parsed_res = await client.get(f"/api/v1/resumes/{version_id}/parsed", headers=attacker_headers)
     assert parsed_res.status_code == 404
+
+
+async def test_ats_generation_success(client: AsyncClient, auth_headers: dict, mock_boto3, db_session: AsyncSession):
+    # 1. Upload a resume
+    files = {"file": ("my_resume.pdf", b"pdf content", "application/pdf")}
+    upload_res = await client.post("/api/v1/resumes/upload", files=files, headers=auth_headers)
+    version_id = upload_res.json()["id"]
+
+    # 2. Mock S3 download & text parsing
+    mock_boto3.get_object.return_value = {
+        "Body": MagicMock(read=lambda: b"pdf content")
+    }
+
+    with patch("pdfplumber.open") as mock_pdf_open:
+        mock_pdf = MagicMock()
+        mock_page = MagicMock()
+        mock_page.extract_text.return_value = (
+            "John Doe\nPython Developer\n"
+            "Education\nBachelor of Science in CS\n"
+            "Experience\nPython Developer from 2020 to 2024\n"
+            "Skills\nPython, FastAPI, Docker\n"
+        )
+        mock_pdf.pages = [mock_page]
+        mock_pdf_open.return_value.__enter__.return_value = mock_pdf
+
+        # Trigger text extraction & structured parsing
+        await client.post(f"/api/v1/resumes/{version_id}/parse", headers=auth_headers)
+
+    # 3. Call ATS Scoring endpoint
+    jd_text = (
+        "We are looking for a Python Developer with 3 years of experience.\n"
+        "Requirements:\n"
+        "Must have Python, FastAPI, and Kubernetes.\n"
+        "Preferred: Docker and AWS Certified.\n"
+        "Bachelor's degree required."
+    )
+    score_payload = {"job_description": jd_text}
+    score_res = await client.post(f"/api/v1/resumes/{version_id}/ats-score", json=score_payload, headers=auth_headers)
+    assert score_res.status_code == 200
+    score_data = score_res.json()
+
+    assert "ats_score" in score_data
+    assert "keyword_score" in score_data
+    assert "skills_score" in score_data
+    assert "experience_score" in score_data
+    assert "education_score" in score_data
+    assert "missing_keywords" in score_data
+    assert "matched_keywords" in score_data
+    assert "recommendations" in score_data
+    assert "matched_skills" in score_data
+    assert "missing_skills" in score_data
+    assert "resume_strengths" in score_data
+    assert "resume_weaknesses" in score_data
+    assert "matched_sections" in score_data
+    assert len(score_data["matched_keywords"]) > 0
+    assert len(score_data["recommendations"]) > 0
+    assert len(score_data["matched_skills"]) > 0
+    assert len(score_data["resume_strengths"]) > 0
+    assert len(score_data["matched_sections"]) > 0
+
+    # 4. Fetch history and verify it is returned
+    history_res = await client.get(f"/api/v1/resumes/{version_id}/ats-history", headers=auth_headers)
+    assert history_res.status_code == 200
+    history_data = history_res.json()
+    assert len(history_data) == 1
+    assert history_data[0]["id"] == score_data["id"]
+
+
+async def test_ats_cache_reuse(client: AsyncClient, auth_headers: dict, mock_boto3, db_session: AsyncSession):
+    # 1. Upload & parse a resume
+    files = {"file": ("my_resume.pdf", b"pdf content", "application/pdf")}
+    upload_res = await client.post("/api/v1/resumes/upload", files=files, headers=auth_headers)
+    version_id = upload_res.json()["id"]
+
+    mock_boto3.get_object.return_value = {
+        "Body": MagicMock(read=lambda: b"pdf content")
+    }
+    with patch("pdfplumber.open") as mock_pdf_open:
+        mock_pdf = MagicMock()
+        mock_page = MagicMock()
+        mock_page.extract_text.return_value = "Python developer.\nSkills\nPython, FastAPI"
+        mock_pdf.pages = [mock_page]
+        mock_pdf_open.return_value.__enter__.return_value = mock_pdf
+        await client.post(f"/api/v1/resumes/{version_id}/parse", headers=auth_headers)
+
+    # 2. Run ATS Analysis twice with same JD
+    jd_text = "Python, FastAPI developer with 2 years of experience."
+    score_payload = {"job_description": jd_text}
+    
+    # First call
+    res1 = await client.post(f"/api/v1/resumes/{version_id}/ats-score", json=score_payload, headers=auth_headers)
+    assert res1.status_code == 200
+    id1 = res1.json()["id"]
+
+    # Second call (should hit cache)
+    res2 = await client.post(f"/api/v1/resumes/{version_id}/ats-score", json=score_payload, headers=auth_headers)
+    assert res2.status_code == 200
+    id2 = res2.json()["id"]
+
+    # Verify ID is exactly identical (cache reuse)
+    assert id1 == id2
+
+    # Verify database has exactly one analysis record
+    from app.resumes.models import ATSAnalysis
+    stmt = select(ATSAnalysis).where(ATSAnalysis.resume_version_id == UUID(version_id))
+    db_session.expire_all()
+    records = (await db_session.execute(stmt)).scalars().all()
+    assert len(records) == 1
+
+
+async def test_ats_ownership_protection(client: AsyncClient, auth_headers: dict, mock_boto3):
+    # 1. Upload a resume under User 1
+    files = {"file": ("my_resume.pdf", b"pdf content", "application/pdf")}
+    upload_res = await client.post("/api/v1/resumes/upload", files=files, headers=auth_headers)
+    version_id = upload_res.json()["id"]
+
+    # 2. Login as another user (Attacker)
+    register_payload = {
+        "email": "attacker2@example.com",
+        "password": "password123",
+        "full_name": "Attacker User 2",
+    }
+    await client.post("/api/v1/auth/register", json=register_payload)
+    login_response = await client.post("/api/v1/auth/login", json={
+        "email": "attacker2@example.com",
+        "password": "password123",
+    })
+    attacker_headers = {"Authorization": f"Bearer {login_response.json()['access_token']}"}
+
+    # 3. Attacker tries to parse or compute ATS score
+    score_res = await client.post(
+        f"/api/v1/resumes/{version_id}/ats-score",
+        json={"job_description": "Python developer"},
+        headers=attacker_headers
+    )
+    assert score_res.status_code == 404
+
+    # 4. Attacker tries to get ATS history
+    history_res = await client.get(f"/api/v1/resumes/{version_id}/ats-history", headers=attacker_headers)
+    assert history_res.status_code == 404
+
+
+async def test_ats_soft_deleted_protection(client: AsyncClient, auth_headers: dict, db_session: AsyncSession):
+    # 1. Upload a resume
+    files = {"file": ("my_resume.pdf", b"pdf content", "application/pdf")}
+    upload_res = await client.post("/api/v1/resumes/upload", files=files, headers=auth_headers)
+    res_data = upload_res.json()
+    version_id = res_data["id"]
+    profile_id = res_data["profile_id"]
+
+    # 2. Soft delete the parent profile
+    from app.resumes.models import ResumeProfile
+    stmt = select(ResumeProfile).where(ResumeProfile.id == UUID(profile_id))
+    profile = (await db_session.execute(stmt)).scalar_one()
+    profile.is_deleted = True
+    await db_session.commit()
+
+    # 3. Try to compute ATS score, should return 404
+    score_res = await client.post(
+        f"/api/v1/resumes/{version_id}/ats-score",
+        json={"job_description": "Python developer"},
+        headers=auth_headers
+    )
+    assert score_res.status_code == 404
+
+
+async def test_ats_large_job_description_rejected(client: AsyncClient, auth_headers: dict):
+    # 1. Upload a resume
+    files = {"file": ("my_resume.pdf", b"pdf content", "application/pdf")}
+    upload_res = await client.post("/api/v1/resumes/upload", files=files, headers=auth_headers)
+    version_id = upload_res.json()["id"]
+
+    # 2. Try to score with a very large job description (exceeding 50,000 characters)
+    large_jd = "Python " * 10000 # 70000 chars
+    score_res = await client.post(
+        f"/api/v1/resumes/{version_id}/ats-score",
+        json={"job_description": large_jd},
+        headers=auth_headers
+    )
+    assert score_res.status_code in [400, 422]
+
