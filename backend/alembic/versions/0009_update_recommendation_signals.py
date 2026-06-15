@@ -25,9 +25,9 @@ def upgrade() -> None:
     op.add_column('recommendation_signals', sa.Column('job_match_id', postgresql.UUID(as_uuid=True), sa.ForeignKey('job_matches.id', ondelete='SET NULL'), nullable=True))
     
     op.add_column('recommendation_signals', sa.Column('signal_source', sa.String(length=50), nullable=False, server_default='application'))
-    op.add_column('recommendation_signals', sa.Column('signal_value', sa.Float(), nullable=False, server_default=1.0))
-    op.add_column('recommendation_signals', sa.Column('confidence_score', sa.Float(), nullable=False, server_default=1.0))
-    op.add_column('recommendation_signals', sa.Column('signal_weight', sa.Float(), nullable=False, server_default=1.0))
+    op.add_column('recommendation_signals', sa.Column('signal_value', sa.Float(), nullable=False, server_default='1.0'))
+    op.add_column('recommendation_signals', sa.Column('confidence_score', sa.Float(), nullable=False, server_default='1.0'))
+    op.add_column('recommendation_signals', sa.Column('signal_weight', sa.Float(), nullable=False, server_default='1.0'))
     op.add_column('recommendation_signals', sa.Column('metadata', postgresql.JSONB(astext_type=sa.Text()), nullable=True, server_default='{}'))
 
     # 2. Alter existing columns (increase length of signal_type)

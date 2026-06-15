@@ -5,7 +5,7 @@ Used by Alembic.
 from app.shared.base import Base
 
 # Import all domain models
-from app.auth.models import RefreshToken
+from app.auth.models import RefreshToken, PasswordResetToken
 from app.users.models import User, UserPreference
 from app.resumes.models import (
     ResumeProfile,

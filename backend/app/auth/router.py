@@ -2,8 +2,10 @@
 Auth module — API router.
 PRD Section 8.2: Authentication Endpoints.
 """
+from datetime import datetime, timezone, timedelta
+from collections import defaultdict
 from typing import Annotated
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, status, Request, HTTPException
 
 from app.auth.schemas import (
     ForgotPasswordRequest,
@@ -19,6 +21,10 @@ from app.core.dependencies import DBSession, get_current_active_user
 from app.auth.service import AuthService
 from app.users.models import User
 from app.users.schemas import UserResponse
+
+# Simple in-memory rate limiter for forgot-password IP requests: max 10 requests per minute per IP.
+ip_forgot_password_history = defaultdict(list)
+
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
@@ -80,10 +86,27 @@ async def logout(body: RefreshRequest, db: DBSession):
     summary="Send password reset email",
     description="Generate and send a password reset link to the user's email address if it exists.",
 )
-async def forgot_password(body: ForgotPasswordRequest, db: DBSession):
-    # TODO: Implement rate limiting for password reset requests to prevent email enumeration and spam.
+async def forgot_password(request: Request, body: ForgotPasswordRequest, db: DBSession):
+    ip_address = request.client.host if request.client else "127.0.0.1"
+    user_agent = request.headers.get("user-agent", "unknown")
+
+    # Rate-limit IP addresses to prevent abuse (max 10 requests per minute per IP)
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(minutes=1)
+    ip_forgot_password_history[ip_address] = [
+        ts for ts in ip_forgot_password_history[ip_address] if ts > cutoff
+    ]
+    if len(ip_forgot_password_history[ip_address]) >= 10:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many password reset requests from this IP. Please try again later.",
+        )
+    ip_forgot_password_history[ip_address].append(now)
+
     auth_service = AuthService(db)
-    await auth_service.forgot_password(email=body.email)
+    await auth_service.forgot_password(
+        email=body.email, ip_address=ip_address, user_agent=user_agent
+    )
     return {"detail": "Password reset link sent if email exists"}
 
 
@@ -94,9 +117,17 @@ async def forgot_password(body: ForgotPasswordRequest, db: DBSession):
     summary="Reset password with token",
     description="Reset the user's password using a valid reset token.",
 )
-async def reset_password(body: ResetPasswordRequest, db: DBSession):
+async def reset_password(request: Request, body: ResetPasswordRequest, db: DBSession):
+    ip_address = request.client.host if request.client else "127.0.0.1"
+    user_agent = request.headers.get("user-agent", "unknown")
+
     auth_service = AuthService(db)
-    await auth_service.reset_password(token=body.token, new_password=body.new_password)
+    await auth_service.reset_password(
+        token=body.token,
+        new_password=body.new_password,
+        ip_address=ip_address,
+        user_agent=user_agent,
+    )
     return {"detail": "Password reset successful"}
 
 

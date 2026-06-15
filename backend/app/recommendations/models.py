@@ -19,13 +19,13 @@ class RecommendationSignal(BaseModel):
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
     )
     application_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("job_applications.id", ondelete="SET NULL"), nullable=True
+        UUID(as_uuid=True), ForeignKey("job_applications.id", ondelete="SET NULL"), nullable=True, index=True
     )
     resume_version_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("resume_versions.id", ondelete="SET NULL"), nullable=True
+        UUID(as_uuid=True), ForeignKey("resume_versions.id", ondelete="SET NULL"), nullable=True, index=True
     )
     job_match_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("job_matches.id", ondelete="SET NULL"), nullable=True
+        UUID(as_uuid=True), ForeignKey("job_matches.id", ondelete="SET NULL"), nullable=True, index=True
     )
     signal_type: Mapped[str] = mapped_column(String(50), nullable=False)
     signal_source: Mapped[str] = mapped_column(String(50), nullable=False)

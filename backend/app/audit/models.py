@@ -17,7 +17,7 @@ class AgentAuditLog(BaseModel):
     __tablename__ = "agent_audit_log"
 
     user_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
     )
     agent_name: Mapped[str] = mapped_column(String(50), nullable=False)
     action_type: Mapped[str] = mapped_column(String(50), nullable=False)

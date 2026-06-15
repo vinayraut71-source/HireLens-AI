@@ -69,7 +69,7 @@ class AnalyticsSnapshot(BaseModel):
     funnel_stage_counts: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
     strongest_resume_version_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("resume_versions.id", ondelete="SET NULL"), nullable=True
+        UUID(as_uuid=True), ForeignKey("resume_versions.id", ondelete="SET NULL"), nullable=True, index=True
     )
     generated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=func.now(), server_default=func.now(), nullable=False

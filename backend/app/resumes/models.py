@@ -18,13 +18,14 @@ class ResumeProfile(SoftDeleteMixin, BaseModel):
     """Parent entity for a logical resume document. PRD Section 7.2."""
     __tablename__ = "resume_profiles"
 
-    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     is_default: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     active_version_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("resume_versions.id", ondelete="SET NULL", use_alter=True, name="fk_resume_profiles_active_version"),
         nullable=True,
+        index=True,
     )
     version_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
 
@@ -41,7 +42,7 @@ class ResumeVersion(SoftDeleteMixin, BaseModel):
     __tablename__ = "resume_versions"
 
     profile_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("resume_profiles.id", ondelete="CASCADE"), nullable=False)
-    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
     version_number: Mapped[int] = mapped_column(Integer, nullable=False)
     original_filename: Mapped[str] = mapped_column(String(255), nullable=False)
     storage_path: Mapped[str] = mapped_column(Text, nullable=False)
@@ -88,10 +89,10 @@ class ResumeVersionEmbedding(BaseModel):
 class AtsScoreHistory(BaseModel):
     __tablename__ = "ats_score_history"
 
-    version_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("resume_versions.id", ondelete="CASCADE"), nullable=False)
-    profile_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("resume_profiles.id", ondelete="CASCADE"), nullable=False)
-    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
-    job_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("jobs.id", ondelete="SET NULL"), nullable=True)
+    version_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("resume_versions.id", ondelete="CASCADE"), nullable=False, index=True)
+    profile_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("resume_profiles.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    job_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("jobs.id", ondelete="SET NULL"), nullable=True, index=True)
     score: Mapped[int] = mapped_column(Integer, nullable=False)
     score_delta: Mapped[int | None] = mapped_column(Integer, nullable=True)
     feedback: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
@@ -101,16 +102,16 @@ class AtsScoreHistory(BaseModel):
 class MatchScoreHistory(BaseModel):
     __tablename__ = "match_score_history"
 
-    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
-    version_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("resume_versions.id", ondelete="CASCADE"), nullable=False)
-    profile_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("resume_profiles.id", ondelete="CASCADE"), nullable=False)
-    job_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("jobs.id", ondelete="CASCADE"), nullable=False)
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    version_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("resume_versions.id", ondelete="CASCADE"), nullable=False, index=True)
+    profile_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("resume_profiles.id", ondelete="CASCADE"), nullable=False, index=True)
+    job_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("jobs.id", ondelete="CASCADE"), nullable=False, index=True)
     overall_score: Mapped[float] = mapped_column(Float, nullable=False)
     ats_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
     score_delta: Mapped[float | None] = mapped_column(Float, nullable=True)
     matched_skills: Mapped[dict] = mapped_column(JSONB, default=list, server_default="[]")
     missing_skills: Mapped[dict] = mapped_column(JSONB, default=list, server_default="[]")
-    match_result_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("match_results.id", ondelete="SET NULL"), nullable=True)
+    match_result_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("match_results.id", ondelete="SET NULL"), nullable=True, index=True)
 
 
 class ATSAnalysis(BaseModel):

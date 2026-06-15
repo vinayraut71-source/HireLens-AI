@@ -29,9 +29,9 @@ class JobEmbedding(BaseModel):
 
 class MatchResult(BaseModel):
     __tablename__ = "match_results"
-    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
-    version_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("resume_versions.id", ondelete="CASCADE"), nullable=False)
-    job_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("jobs.id", ondelete="CASCADE"), nullable=False)
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    version_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("resume_versions.id", ondelete="CASCADE"), nullable=False, index=True)
+    job_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("jobs.id", ondelete="CASCADE"), nullable=False, index=True)
     overall_score: Mapped[float] = mapped_column(Float, nullable=False)
     ats_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
     matched_skills: Mapped[dict] = mapped_column(JSONB, default=list, server_default="[]")
@@ -42,7 +42,7 @@ class MatchResult(BaseModel):
 class SkillGap(BaseModel):
     __tablename__ = "skill_gaps"
     user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
-    match_result_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("match_results.id", ondelete="CASCADE"), nullable=False)
+    match_result_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("match_results.id", ondelete="CASCADE"), nullable=False, index=True)
     skill_name: Mapped[str] = mapped_column(String(255), nullable=False)
     priority: Mapped[str] = mapped_column(String(20), nullable=False)
     category: Mapped[str | None] = mapped_column(String(50), nullable=True)
