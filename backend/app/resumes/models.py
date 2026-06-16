@@ -143,3 +143,63 @@ class ATSAnalysis(BaseModel):
 
     resume_version: Mapped["ResumeVersion"] = relationship(foreign_keys=[resume_version_id])
 
+
+class ResumeTailoringSession(BaseModel):
+    __tablename__ = "resume_tailoring_sessions"
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    resume_version_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("resume_versions.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    ats_analysis_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("ats_analyses.id", ondelete="SET NULL"), nullable=True
+    )
+    job_match_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("job_matches.id", ondelete="SET NULL"), nullable=True
+    )
+    job_title: Mapped[str] = mapped_column(String(255), nullable=False)
+    company_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    job_description_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    original_ats_score: Mapped[int] = mapped_column(Integer, nullable=False)
+    tailored_ats_score: Mapped[int] = mapped_column(Integer, nullable=False)
+    tailoring_mode: Mapped[str] = mapped_column(String(20), nullable=False)  # deterministic, ai_assisted
+    status: Mapped[str] = mapped_column(String(20), nullable=False, index=True)  # pending, completed, failed
+
+    tailoring_quality_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    resume_snapshot: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+
+    suggestions: Mapped[list["TailoredResumeSuggestion"]] = relationship(
+        back_populates="session", cascade="all, delete-orphan"
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "resume_version_id",
+            "job_description_hash",
+            "tailoring_mode",
+            name="uq_resume_tailoring_sessions_version_hash_mode"
+        ),
+    )
+
+
+
+class TailoredResumeSuggestion(BaseModel):
+    __tablename__ = "tailored_resume_suggestions"
+
+    session_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("resume_tailoring_sessions.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    section_name: Mapped[str] = mapped_column(String(30), nullable=False)  # summary, experience, education, skills, projects, certifications
+    suggestion_type: Mapped[str] = mapped_column(String(30), nullable=False, index=True)  # keyword_addition, bullet_rewrite, section_improvement, skill_recommendation, ats_optimization
+    original_content: Mapped[str | None] = mapped_column(Text, nullable=True)
+    suggested_content: Mapped[str] = mapped_column(Text, nullable=False)
+    confidence_score: Mapped[float] = mapped_column(Float, nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    severity_level: Mapped[str | None] = mapped_column(String(20), nullable=True)  # low, medium, high, critical
+
+
+    session: Mapped["ResumeTailoringSession"] = relationship(back_populates="suggestions")
+
+

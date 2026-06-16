@@ -14,6 +14,8 @@ from app.resumes.models import (
     AtsScoreHistory,
     MatchScoreHistory,
     ATSAnalysis,
+    ResumeTailoringSession,
+    TailoredResumeSuggestion,
 )
 from app.jobs.models import Job, JobEmbedding, MatchResult, SkillGap, JobMatch, SkillGapAnalysis
 from app.applications.models import Application, ApplicationPackage, OutcomeEvent, JobApplication, ApplicationTimelineEvent
@@ -26,4 +28,11 @@ from app.infrastructure.models import InfrastructureConfig
 
 # B2B Models
 from app.models.b2b import Company, Recruiter, CompanyUser, JobPosting, CandidateMatch
-from app.job_sources.models import ExternalJobSource
+from app.job_sources.models import (
+    ExternalJobSource,
+    ProviderSyncLog,
+    ProviderConfig,
+    ProviderLock,
+    FailedSyncJob,
+    ProviderToggleAudit,
+)

@@ -12,8 +12,11 @@ from app.resumes.schemas import (
     ResumeParsedResponse,
     AtsScoreRequest,
     ATSAnalysisResponse,
+    ResumeTailoringRequest,
+    ResumeTailoringResponse,
+    ResumeTailoringSessionResponse,
 )
-from app.resumes.service import ResumeStorageService, ResumeVersionService
+from app.resumes.service import ResumeStorageService, ResumeVersionService, ResumeTailoringService
 
 router = APIRouter(prefix="/resumes", tags=["Resumes"])
 
@@ -193,6 +196,82 @@ async def get_ats_history(
 ):
     version_service = ResumeVersionService(db, ResumeStorageService())
     return await version_service.list_ats_history(current_user.id, version_id)
+
+
+@router.post(
+    "/{version_id}/tailor",
+    response_model=ResumeTailoringResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Generate tailored resume recommendations",
+    description="Analyzes the resume version against a job description and provides tailored suggestions."
+)
+async def tailor_resume(
+    version_id: UUID,
+    body: ResumeTailoringRequest,
+    db: DBSession,
+    current_user: Annotated[User, Depends(get_current_active_user)],
+    mode: str = "deterministic"
+):
+    if mode not in ["deterministic", "ai_assisted"]:
+        raise HTTPException(status_code=400, detail="Invalid tailoring mode. Must be 'deterministic' or 'ai_assisted'.")
+    
+    return await ResumeTailoringService.tailor_resume(
+        db=db,
+        user_id=current_user.id,
+        version_id=version_id,
+        job_description=body.job_description,
+        job_title=body.job_title,
+        company_name=body.company_name,
+        mode=mode
+    )
+
+
+@router.get(
+    "/tailoring/{session_id}",
+    response_model=ResumeTailoringSessionResponse,
+    summary="Retrieve tailoring session",
+    description="Retrieves the details and recommendations of a specific resume tailoring session."
+)
+async def get_tailoring_session(
+    session_id: UUID,
+    db: DBSession,
+    current_user: Annotated[User, Depends(get_current_active_user)]
+):
+    session = await ResumeTailoringService.get_tailoring_session(db, current_user.id, session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Resume tailoring session not found.")
+    return session
+
+
+@router.get(
+    "/{version_id}/tailoring-history",
+    response_model=list[ResumeTailoringSessionResponse],
+    summary="Retrieve history",
+    description="Lists all historical tailoring sessions for a specific resume version."
+)
+async def get_tailoring_history(
+    version_id: UUID,
+    db: DBSession,
+    current_user: Annotated[User, Depends(get_current_active_user)]
+):
+    return await ResumeTailoringService.get_tailoring_history(db, current_user.id, version_id)
+
+
+@router.delete(
+    "/tailoring/{session_id}",
+    summary="Delete tailoring session",
+    description="Deletes a specific resume tailoring session and its cascade recommendations."
+)
+async def delete_tailoring_session(
+    session_id: UUID,
+    db: DBSession,
+    current_user: Annotated[User, Depends(get_current_active_user)]
+):
+    deleted = await ResumeTailoringService.delete_tailoring_session(db, current_user.id, session_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Resume tailoring session not found.")
+    return {"status": "success", "message": "Tailoring session deleted successfully."}
+
 
 
 

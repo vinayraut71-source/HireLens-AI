@@ -6,7 +6,7 @@ import boto3
 import logging
 import pdfplumber
 from docx import Document
-from datetime import datetime
+from datetime import datetime, timezone
 from botocore.exceptions import ClientError
 import hashlib
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -455,14 +455,30 @@ class ResumeVersionService:
             matched_sections=scores["matched_sections"]
         )
 
+        from sqlalchemy.exc import IntegrityError
         try:
             self.db.add(analysis)
             await self.db.commit()
             await self.db.refresh(analysis)
+        except IntegrityError as e:
+            await self.db.rollback()
+            logger.warning(f"IntegrityError during analyze_ats commit, probably concurrent duplicate request: {str(e)}")
+            import asyncio
+            cached_analysis = None
+            for attempt in range(5):
+                cache_result = await self.db.execute(cache_stmt)
+                cached_analysis = cache_result.scalar_one_or_none()
+                if cached_analysis:
+                    break
+                await asyncio.sleep(0.1)
+            if cached_analysis:
+                return cached_analysis
+            raise HTTPException(status_code=500, detail="Failed to save ATS analysis to database.")
         except Exception as e:
             logger.error(f"Failed to save ATS analysis for version {version_id}: {str(e)}", exc_info=True)
             await self.db.rollback()
             raise HTTPException(status_code=500, detail="Failed to save ATS analysis to database.")
+
 
         return analysis
 
@@ -738,5 +754,381 @@ class ATSScoringService:
             "resume_weaknesses": weaknesses,
             "matched_sections": matched_sections
         }
+
+
+class ResumeTailoringService:
+    _locks = {}
+
+    @staticmethod
+    async def tailor_resume(
+        db: AsyncSession,
+        user_id: uuid.UUID,
+        version_id: uuid.UUID,
+        job_description: str,
+        job_title: str,
+        company_name: str | None,
+        mode: str = "deterministic"
+    ) -> dict:
+        """
+        Runs ATS analysis, generates tailoring recommendations, estimates improvements,
+        saves results, logs analytics, and dispatches learning loop feedback signals.
+        """
+        # 1. Validate ownership & soft delete
+        stmt = (
+            select(ResumeVersion)
+            .join(ResumeProfile, ResumeVersion.profile_id == ResumeProfile.id)
+            .where(
+                ResumeVersion.id == version_id,
+                ResumeVersion.user_id == user_id,
+                ResumeVersion.is_deleted == False,
+                ResumeProfile.is_deleted == False
+            )
+        )
+        result = await db.execute(stmt)
+        version = result.scalar_one_or_none()
+        if not version:
+            raise HTTPException(status_code=404, detail="Resume version not found")
+
+        # 2. Check completed session cache
+        import hashlib
+        from sqlalchemy.orm import selectinload
+        jd_clean = job_description.strip()
+        jd_hash = hashlib.sha256(jd_clean.encode("utf-8")).hexdigest()
+
+        from app.resumes.models import ResumeTailoringSession, TailoredResumeSuggestion
+        cache_stmt = (
+            select(ResumeTailoringSession)
+            .options(selectinload(ResumeTailoringSession.suggestions))
+            .where(
+                ResumeTailoringSession.resume_version_id == version_id,
+                ResumeTailoringSession.job_description_hash == jd_hash,
+                ResumeTailoringSession.tailoring_mode == mode,
+                ResumeTailoringSession.status == "completed"
+            )
+            .limit(1)
+        )
+        cache_res = await db.execute(cache_stmt)
+        cached_session = cache_res.scalar_one_or_none()
+        if cached_session:
+            delta = cached_session.tailored_ats_score - cached_session.original_ats_score
+            return {
+                "session_id": cached_session.id,
+                "original_ats_score": cached_session.original_ats_score,
+                "tailored_ats_score": cached_session.tailored_ats_score,
+                "improvement_delta": delta,
+                "suggestions": [
+                    {
+                        "section_name": s.section_name,
+                        "suggestion_type": s.suggestion_type,
+                        "original_content": s.original_content,
+                        "suggested_content": s.suggested_content,
+                        "confidence_score": s.confidence_score,
+                        "reason": s.reason,
+                        "severity_level": s.severity_level
+                    } for s in cached_session.suggestions
+                ]
+            }
+
+        # If cache miss, acquire lock to serialize duplicate generation
+        import asyncio
+        lock_key = (version_id, jd_hash, mode)
+        if lock_key not in ResumeTailoringService._locks:
+            ResumeTailoringService._locks[lock_key] = asyncio.Lock()
+        lock = ResumeTailoringService._locks[lock_key]
+
+        async with lock:
+            # Double-check cache inside the lock
+            cache_res = await db.execute(cache_stmt)
+            cached_session = cache_res.scalar_one_or_none()
+            if cached_session:
+                delta = cached_session.tailored_ats_score - cached_session.original_ats_score
+                return {
+                    "session_id": cached_session.id,
+                    "original_ats_score": cached_session.original_ats_score,
+                    "tailored_ats_score": cached_session.tailored_ats_score,
+                    "improvement_delta": delta,
+                    "suggestions": [
+                        {
+                            "section_name": s.section_name,
+                            "suggestion_type": s.suggestion_type,
+                            "original_content": s.original_content,
+                            "suggested_content": s.suggested_content,
+                            "confidence_score": s.confidence_score,
+                            "reason": s.reason,
+                            "severity_level": s.severity_level
+                        } for s in cached_session.suggestions
+                    ]
+                }
+
+            # 3. Run/Get ATS analysis
+            version_service = ResumeVersionService(db, ResumeStorageService())
+            analysis = await version_service.analyze_ats(user_id, version_id, job_description)
+
+            # 4. Generate suggestions via AI Agent
+            from app.ai.agents.resume_tailoring_agent import ResumeTailoringAgent
+            agent = ResumeTailoringAgent()
+            agent_res = await agent.run(version, job_description, mode=mode)
+
+            # 5. Calculate quality score & capture snapshot
+            original_keyword_score = analysis.keyword_score
+            original_skills_score = analysis.skills_score
+
+            has_keyword_sug = any(s["suggestion_type"] == "keyword_addition" for s in agent_res["suggestions"])
+            has_skills_sug = any(s["suggestion_type"] == "skill_recommendation" for s in agent_res["suggestions"])
+
+            improved_keyword_score = min(100, original_keyword_score + 25) if has_keyword_sug else original_keyword_score
+            improved_skills_score = min(100, original_skills_score + 25) if has_skills_sug else original_skills_score
+
+            delta_keyword = max(0, improved_keyword_score - original_keyword_score)
+            delta_skills = max(0, improved_skills_score - original_skills_score)
+
+            matched_sections_count = len(analysis.matched_sections) if analysis.matched_sections else 0
+            section_completeness = (matched_sections_count / 5.0) * 100
+
+            delta_ats = max(0, agent_res["tailored_ats_score"] - agent_res["original_ats_score"])
+
+            tailoring_quality_score = round(
+                0.4 * delta_ats +
+                0.3 * delta_keyword +
+                0.2 * delta_skills +
+                0.1 * section_completeness
+            )
+
+            resume_snapshot = {
+                "summary": version.extracted_text[:500] if version.extracted_text else "",
+                "skills": version.skills or [],
+                "education": version.education or [],
+                "experience": version.experience or [],
+                "certifications": version.certifications or []
+            }
+
+            # 6. Save tailoring session
+            session = ResumeTailoringSession(
+                user_id=user_id,
+                resume_version_id=version_id,
+                ats_analysis_id=analysis.id,
+                job_match_id=None,
+                job_title=job_title,
+                company_name=company_name,
+                job_description_hash=analysis.job_description_hash,
+                original_ats_score=agent_res["original_ats_score"],
+                tailored_ats_score=agent_res["tailored_ats_score"],
+                tailoring_mode=mode,
+                status="completed",
+                tailoring_quality_score=tailoring_quality_score,
+                resume_snapshot=resume_snapshot
+            )
+
+            # Query if there is an existing job match for the same resume version
+            from app.jobs.models import JobMatch
+            match_stmt = select(JobMatch).where(
+                JobMatch.resume_version_id == version_id,
+                JobMatch.user_id == user_id
+            ).limit(1)
+            match_res = await db.execute(match_stmt)
+            job_match = match_res.scalar_one_or_none()
+            if job_match:
+                session.job_match_id = job_match.id
+
+            from sqlalchemy.exc import IntegrityError
+            try:
+                db.add(session)
+                await db.flush()
+
+                # 7. Save suggestions
+                suggestions_list = []
+                for sug in agent_res["suggestions"]:
+                    suggestion = TailoredResumeSuggestion(
+                        session_id=session.id,
+                        section_name=sug["section_name"],
+                        suggestion_type=sug["suggestion_type"],
+                        original_content=sug.get("original_content"),
+                        suggested_content=sug["suggested_content"],
+                        confidence_score=sug["confidence_score"],
+                        reason=sug["reason"],
+                        severity_level=sug.get("severity_level")
+                    )
+                    db.add(suggestion)
+                    suggestions_list.append(suggestion)
+
+                # 8. Record Recommendation Signal (learning loop)
+                delta = session.tailored_ats_score - session.original_ats_score
+                from app.recommendations.models import RecommendationSignal
+                sig_comp = RecommendationSignal(
+                    user_id=user_id,
+                    resume_version_id=version_id,
+                    job_match_id=session.job_match_id,
+                    signal_type="tailoring_completed",
+                    signal_source="resume",
+                    signal_value=1.0,
+                    confidence_score=1.0,
+                    signal_weight=1.0,
+                    metadata_={"original_score": session.original_ats_score, "tailored_score": session.tailored_ats_score}
+                )
+                db.add(sig_comp)
+
+                if delta >= 15:
+                    sig_high = RecommendationSignal(
+                        user_id=user_id,
+                        resume_version_id=version_id,
+                        job_match_id=session.job_match_id,
+                        signal_type="tailoring_high_improvement",
+                        signal_source="resume",
+                        signal_value=2.0,
+                        confidence_score=1.0,
+                        signal_weight=2.0,
+                        metadata_={"delta": delta}
+                    )
+                    db.add(sig_high)
+                else:
+                    sig_low = RecommendationSignal(
+                        user_id=user_id,
+                        resume_version_id=version_id,
+                        job_match_id=session.job_match_id,
+                        signal_type="tailoring_low_improvement",
+                        signal_source="resume",
+                        signal_value=0.5,
+                        confidence_score=1.0,
+                        signal_weight=0.5,
+                        metadata_={"delta": delta}
+                    )
+                    db.add(sig_low)
+
+                # 9. Publish Event to EventBus
+                from app.events.analytics_events import FeatureUsageEvent
+                from app.events.bus import event_bus
+                event = FeatureUsageEvent(
+                    event_id=uuid.uuid4(),
+                    timestamp=datetime.now(timezone.utc),
+                    user_id=user_id,
+                    feature_name="resume_tailoring_completed",
+                    interaction_details={
+                        "original_ats_score": session.original_ats_score,
+                        "estimated_ats_score": session.tailored_ats_score,
+                        "delta": delta,
+                        "suggestion_count": len(agent_res["suggestions"])
+                    }
+                )
+                await event_bus.publish("resume_tailoring_completed", event)
+
+                await db.commit()
+                await db.refresh(session)
+            except IntegrityError as e:
+                await db.rollback()
+                logger.warning(f"IntegrityError during tailor_resume transaction, probably concurrent duplicate request: {str(e)}")
+                import asyncio
+                cached_session = None
+                for attempt in range(5):
+                    cache_res = await db.execute(cache_stmt)
+                    cached_session = cache_res.scalar_one_or_none()
+                    if cached_session:
+                        break
+                    await asyncio.sleep(0.1)
+                if cached_session:
+                    delta = cached_session.tailored_ats_score - cached_session.original_ats_score
+                    return {
+                        "session_id": cached_session.id,
+                        "original_ats_score": cached_session.original_ats_score,
+                        "tailored_ats_score": cached_session.tailored_ats_score,
+                        "improvement_delta": delta,
+                        "suggestions": [
+                            {
+                                "section_name": s.section_name,
+                                "suggestion_type": s.suggestion_type,
+                                "original_content": s.original_content,
+                                "suggested_content": s.suggested_content,
+                                "confidence_score": s.confidence_score,
+                                "reason": s.reason,
+                                "severity_level": s.severity_level
+                            } for s in cached_session.suggestions
+                        ]
+                    }
+                else:
+                    raise
+
+            return {
+                "session_id": session.id,
+                "original_ats_score": session.original_ats_score,
+                "tailored_ats_score": session.tailored_ats_score,
+                "improvement_delta": delta,
+                "suggestions": [
+                    {
+                        "section_name": s.section_name,
+                        "suggestion_type": s.suggestion_type,
+                        "original_content": s.original_content,
+                        "suggested_content": s.suggested_content,
+                        "confidence_score": s.confidence_score,
+                        "reason": s.reason,
+                        "severity_level": s.severity_level
+                    } for s in suggestions_list
+                ]
+            }
+
+
+    @staticmethod
+    async def get_tailoring_session(db: AsyncSession, user_id: uuid.UUID, session_id: uuid.UUID) -> ResumeTailoringSession | None:
+        """Retrieves details of a tailoring session if owned by the user."""
+        from app.resumes.models import ResumeTailoringSession
+        from sqlalchemy.orm import selectinload
+        stmt = (
+            select(ResumeTailoringSession)
+            .options(selectinload(ResumeTailoringSession.suggestions))
+            .where(
+                ResumeTailoringSession.id == session_id,
+                ResumeTailoringSession.user_id == user_id
+            )
+        )
+        res = await db.execute(stmt)
+        return res.scalar_one_or_none()
+
+    @staticmethod
+    async def get_tailoring_history(db: AsyncSession, user_id: uuid.UUID, version_id: uuid.UUID) -> list[ResumeTailoringSession]:
+        """Lists historical tailoring sessions for a specific resume version."""
+        # Validate that the resume version exists, belongs to the user, and is not soft-deleted
+        stmt_v = (
+            select(ResumeVersion)
+            .join(ResumeProfile, ResumeVersion.profile_id == ResumeProfile.id)
+            .where(
+                ResumeVersion.id == version_id,
+                ResumeVersion.user_id == user_id,
+                ResumeVersion.is_deleted == False,
+                ResumeProfile.is_deleted == False
+            )
+        )
+        res_v = await db.execute(stmt_v)
+        version = res_v.scalar_one_or_none()
+        if not version:
+            raise HTTPException(status_code=404, detail="Resume version not found")
+
+        from app.resumes.models import ResumeTailoringSession
+        from sqlalchemy.orm import selectinload
+        stmt = (
+            select(ResumeTailoringSession)
+            .options(selectinload(ResumeTailoringSession.suggestions))
+            .where(
+                ResumeTailoringSession.resume_version_id == version_id,
+                ResumeTailoringSession.user_id == user_id
+            )
+            .order_by(ResumeTailoringSession.created_at.desc())
+        )
+        res = await db.execute(stmt)
+        return list(res.scalars().all())
+
+    @staticmethod
+    async def delete_tailoring_session(db: AsyncSession, user_id: uuid.UUID, session_id: uuid.UUID) -> bool:
+        """Deletes a tailoring session (cascade deletes recommendations) if owned by the user."""
+        from app.resumes.models import ResumeTailoringSession
+        stmt = select(ResumeTailoringSession).where(
+            ResumeTailoringSession.id == session_id,
+            ResumeTailoringSession.user_id == user_id
+        )
+        res = await db.execute(stmt)
+        session = res.scalar_one_or_none()
+        if not session:
+            return False
+        await db.delete(session)
+        await db.commit()
+        return True
+
 
 

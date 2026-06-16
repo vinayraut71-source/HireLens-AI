@@ -32,6 +32,7 @@ class Settings(BaseSettings):
     # --- Gemini AI ---
     GEMINI_API_KEY: str
     GEMINI_MODEL: str = "gemini-1.5-flash"
+    GEMINI_TIMEOUT_SECONDS: int = 30
 
     # --- Application ---
     APP_NAME: str = "HireLens-AI"
